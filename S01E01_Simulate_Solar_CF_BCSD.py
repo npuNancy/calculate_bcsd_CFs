@@ -8,16 +8,17 @@
   1. 从 BCSD 数据中读取 rsds、tas、uas、vas 四个变量；
   2. rsds 作为全球水平短波辐射 GHI，单位自动转换为 kW m-2；
   3. tas 自动转换为摄氏度；
-  4. uas 和 vas 合成为近地面风速，用于光伏组件温度修正；
-  5. 根据 UTC 时间、纬度和经度计算太阳天顶角；
-  6. 使用 Erbs 模型将 GHI 分解为直接辐射和散射辐射；
-  7. 假设光伏组件采用双轴跟踪：
+  4. 以 rsds 的半点时间轴为主，将瞬时变量 tas/uas/vas 线性插值到 rsds 时间；
+  5. uas 和 vas 合成为近地面风速，用于光伏组件温度修正；
+  6. 根据 UTC 时间、纬度和经度计算太阳天顶角；
+  7. 使用 Erbs 模型将 GHI 分解为直接辐射和散射辐射；
+  8. 假设光伏组件采用双轴跟踪：
        - 直射辐射按 DNI 入射到组件平面；
        - 散射辐射采用 isotropic diffuse 近似；
-  8. 使用论文中的温度修正方法计算组件温度和温度系数；
-  9. 使用论文中的系统效率系数 SYS_coef = 0.8056；
- 10. 计算光伏容量因子，并限制在 [0, 1] 范围内；
- 11. 按时间分块计算，并逐块写入 NetCDF 文件，避免一次性占用过多内存。
+  9. 使用论文中的温度修正方法计算组件温度和温度系数；
+ 10. 使用论文中的系统效率系数 SYS_coef = 0.8056；
+ 11. 计算光伏容量因子，并限制在 [0, 1] 范围内；
+ 12. 按时间分块计算，并逐块写入 NetCDF 文件，避免一次性占用过多内存。
 
 输入数据路径格式：
   {data_dir}/{model}/{region}/{model}/*.nc
@@ -45,7 +46,8 @@
   - 数值范围：[0, 1]
 
 注意：
-  - 本脚本不把 3h 数据插值到小时；输出时间分辨率与输入一致。
+  - 本脚本不把 3h 数据插值到小时；输出时间分辨率与 rsds 输入一致。
+  - 时间对齐采用方案4：保留 rsds/pr 的半点时间轴，将瞬时 tas/uas/vas 插值到 rsds 时间。
   - rsds 通常是 W m-2 的瞬时或平均通量，不是 ERA5-Land ssrd 的累计 J m-2。
   - 若输入变量没有单位属性，脚本会根据数值大小进行简单判断。
   - region 可指定单个区域，也可设置为 all 批量处理 model 下所有有效区域。
@@ -398,6 +400,121 @@ def build_time_index(
     return idx, doy, hour_decimal
 
 
+def _coord_values_close(a: np.ndarray, b: np.ndarray, name: str) -> bool:
+    """检查空间坐标是否一致。"""
+    if a.shape != b.shape:
+        logger.error("%s 坐标长度不一致：%s vs %s", name, a.shape, b.shape)
+        return False
+    if np.issubdtype(a.dtype, np.number) and np.issubdtype(b.dtype, np.number):
+        ok = np.allclose(a, b, rtol=0.0, atol=1e-6, equal_nan=True)
+    else:
+        ok = np.array_equal(a, b)
+    if not ok:
+        logger.error("%s 坐标值不一致，当前脚本不做空间插值。", name)
+    return ok
+
+
+def validate_same_spatial_grid(
+    ds_ref: xr.Dataset,
+    others: dict[str, xr.Dataset],
+    lat_name: str,
+    lon_name: str,
+) -> None:
+    """确保 rsds/tas/uas/vas 在同一空间网格上。"""
+    ref_lat = ds_ref[lat_name].values
+    ref_lon = ds_ref[lon_name].values
+    for name, ds in others.items():
+        if lat_name not in ds.coords and lat_name not in ds.dims:
+            raise KeyError(f"{name} 文件中找不到纬度坐标 {lat_name}")
+        if lon_name not in ds.coords and lon_name not in ds.dims:
+            raise KeyError(f"{name} 文件中找不到经度坐标 {lon_name}")
+        if not _coord_values_close(ref_lat, ds[lat_name].values, f"{name}.{lat_name}"):
+            raise ValueError(f"{name} 与 rsds 的纬度网格不一致。")
+        if not _coord_values_close(ref_lon, ds[lon_name].values, f"{name}.{lon_name}"):
+            raise ValueError(f"{name} 与 rsds 的经度网格不一致。")
+
+
+def _datetime64_to_ns(values: np.ndarray) -> np.ndarray:
+    """将 datetime64 坐标转换为 ns 整数，便于 searchsorted。"""
+    arr = np.asarray(values)
+    if not np.issubdtype(arr.dtype, np.datetime64):
+        # 当前 BCSD 文件通常 decode 为 datetime64。若不是，则直接转 float。
+        # 这种情况要求四个变量的 time 单位一致。
+        return arr.astype(np.float64)
+    return arr.astype("datetime64[ns]").astype(np.int64)
+
+
+def interp_instantaneous_to_target_times_chunk(
+    da: xr.DataArray,
+    time_name: str,
+    target_times: np.ndarray,
+    *,
+    fill_boundary: str = "nearest",
+) -> np.ndarray:
+    """
+    将瞬时变量按时间线性插值到目标时间轴，返回 numpy 数组。
+
+    这是方案4的核心：
+      - target_times 来自 rsds.time，例如 01:30, 04:30, ...；
+      - da 来自 tas/uas/vas，例如 03:00, 06:00, ...；
+      - 对时间轴内部目标点做线性插值；
+      - 对超出源时间范围的边界点，默认用最近的源时间值填充。
+
+    注意：只沿时间维插值，不做空间插值。
+    """
+    src_times = da[time_name].values
+    src_num = _datetime64_to_ns(src_times)
+    tgt_num = _datetime64_to_ns(target_times)
+
+    if src_num.ndim != 1:
+        raise ValueError(f"{da.name or 'variable'} 的时间坐标不是一维。")
+    if src_num.size < 1:
+        raise ValueError(f"{da.name or 'variable'} 的时间坐标为空。")
+    if np.any(np.diff(src_num) <= 0):
+        raise ValueError(f"{da.name or 'variable'} 的时间坐标不是严格递增，无法插值。")
+
+    nsrc = src_num.size
+    right = np.searchsorted(src_num, tgt_num, side="left")
+    right = np.clip(right, 0, nsrc - 1)
+    left = np.clip(right - 1, 0, nsrc - 1)
+
+    exact = src_num[right] == tgt_num
+    left[exact] = right[exact]
+
+    before = tgt_num <= src_num[0]
+    after = tgt_num >= src_num[-1]
+    if fill_boundary == "nearest":
+        left[before] = 0
+        right[before] = 0
+        left[after] = nsrc - 1
+        right[after] = nsrc - 1
+    elif fill_boundary == "nan":
+        # 内部仍线性插值，边界后续置 NaN。
+        pass
+    else:
+        raise ValueError(f"不支持 fill_boundary={fill_boundary!r}")
+
+    i0 = int(min(left.min(), right.min()))
+    i1 = int(max(left.max(), right.max())) + 1
+    src_block = da.isel({time_name: slice(i0, i1)}).values.astype(np.float32)
+
+    left_rel = left - i0
+    right_rel = right - i0
+
+    left_t = src_num[left].astype(np.float64)
+    right_t = src_num[right].astype(np.float64)
+    tgt_t = tgt_num.astype(np.float64)
+    denom = right_t - left_t
+    with np.errstate(invalid="ignore", divide="ignore"):
+        w = np.where(denom != 0, (tgt_t - left_t) / denom, 0.0).astype(np.float32)
+    w = w[:, None, None]
+
+    out = src_block[left_rel] * (1.0 - w) + src_block[right_rel] * w
+    if fill_boundary == "nan":
+        out[before | after] = np.nan
+    return out.astype(np.float32)
+
+
 def create_output_file(
     out_file: Path,
     rsds_file: Path,
@@ -523,31 +640,25 @@ def compute_region_solar_cf(
     lat_name = find_coord_name(ds_rsds, ["lat", "latitude"])
     lon_name = find_coord_name(ds_rsds, ["lon", "longitude"])
 
-    # 关键修复：四个变量先按公共 time/lat/lon 对齐
+    # 以 rsds 的半点时间轴为主。 将 tas/uas/vas 线性插值到 rsds 时间轴，边界用最近值填充。
+    # 这样可以避免严格时间交集导致的时间步丢失，同时保持与 rsds 的时间对齐。
+    # 不再对四个变量做 join="inner" 的严格时间交集，否则 01:30 与 03:00 不重合会导致时间步丢失。
+    # tas/uas/vas 是瞬时变量，后续在每个时间块内线性插值到 rsds.time。
+    validate_same_spatial_grid(
+        ds_rsds,
+        {"tas": ds_tas, "uas": ds_uas, "vas": ds_vas},
+        lat_name=lat_name,
+        lon_name=lon_name,
+    )
+
     n_time_before = {
         "rsds": ds_rsds.sizes[time_name],
         "tas": ds_tas.sizes[time_name],
         "uas": ds_uas.sizes[time_name],
         "vas": ds_vas.sizes[time_name],
     }
-
-    ds_rsds, ds_tas, ds_uas, ds_vas = xr.align(
-        ds_rsds,
-        ds_tas,
-        ds_uas,
-        ds_vas,
-        join="inner",
-        copy=False,
-    )
-
-    n_time_after = ds_rsds.sizes[time_name]
-
-    if len(set(n_time_before.values())) != 1 or n_time_after != max(n_time_before.values()):
-        logger.warning(
-            "输入变量时间轴不完全一致，已按公共 time 取交集：%s -> %d",
-            n_time_before,
-            n_time_after,
-        )
+    logger.info("输入时间步数量：%s", n_time_before)
+    logger.info("时间对齐策略：保留 rsds.time，将 tas/uas/vas 线性插值到 rsds.time（边界用最近值）。")
 
     time_idx, doy_all, hour_all = build_time_index(ds_rsds[time_name], years, months)
     lats = ds_rsds[lat_name].values.astype(np.float32)
@@ -565,6 +676,7 @@ def compute_region_solar_cf(
         "years": years,
         "months": months if months.strip() else "1-12",
         "source_files": ", ".join(str(p) for p in [rsds_file, tas_file, uas_file, vas_file]),
+        "time_alignment": "scheme4: keep rsds time axis; linearly interpolate instantaneous tas/uas/vas to rsds time; boundary uses nearest value",
         "radiation_decomposition": "Erbs diffuse fraction from rsds/GHI; same data requirement as original code",
         "tracking": "two-axis tracking; direct component uses DNI",
         "temperature_correction": "TEMcoef=1-gamma*(Tcell-25), Tcell=4.3+0.943*Tair+0.028*I-1.528*V",
@@ -596,10 +708,20 @@ def compute_region_solar_cf(
             end = min(start + chunk_time, n_time)
             idx_chunk = time_idx[start:end]
 
+            # rsds 是主时间轴变量，直接按 rsds.time 读取。
+            # tas/uas/vas 是瞬时变量，按方案4插值到当前 rsds 时间块。
+            target_times = ds_rsds[time_name].isel({time_name: idx_chunk}).values
+
             rsds_raw = ds_rsds[rsds_var].isel({time_name: idx_chunk}).values
-            tas_raw = ds_tas[tas_var].isel({time_name: idx_chunk}).values
-            uas_raw = ds_uas[uas_var].isel({time_name: idx_chunk}).values.astype(np.float32)
-            vas_raw = ds_vas[vas_var].isel({time_name: idx_chunk}).values.astype(np.float32)
+            tas_raw = interp_instantaneous_to_target_times_chunk(
+                ds_tas[tas_var], time_name, target_times, fill_boundary="nearest"
+            )
+            uas_raw = interp_instantaneous_to_target_times_chunk(
+                ds_uas[uas_var], time_name, target_times, fill_boundary="nearest"
+            )
+            vas_raw = interp_instantaneous_to_target_times_chunk(
+                ds_vas[vas_var], time_name, target_times, fill_boundary="nearest"
+            )
 
             rsds_kw = to_kw_m2(rsds_raw, rsds_units)
             tas_c = tas_to_celsius(tas_raw, tas_units)
