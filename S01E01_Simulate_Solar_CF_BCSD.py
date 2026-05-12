@@ -523,6 +523,32 @@ def compute_region_solar_cf(
     lat_name = find_coord_name(ds_rsds, ["lat", "latitude"])
     lon_name = find_coord_name(ds_rsds, ["lon", "longitude"])
 
+    # 关键修复：四个变量先按公共 time/lat/lon 对齐
+    n_time_before = {
+        "rsds": ds_rsds.sizes[time_name],
+        "tas": ds_tas.sizes[time_name],
+        "uas": ds_uas.sizes[time_name],
+        "vas": ds_vas.sizes[time_name],
+    }
+
+    ds_rsds, ds_tas, ds_uas, ds_vas = xr.align(
+        ds_rsds,
+        ds_tas,
+        ds_uas,
+        ds_vas,
+        join="inner",
+        copy=False,
+    )
+
+    n_time_after = ds_rsds.sizes[time_name]
+
+    if len(set(n_time_before.values())) != 1 or n_time_after != max(n_time_before.values()):
+        logger.warning(
+            "输入变量时间轴不完全一致，已按公共 time 取交集：%s -> %d",
+            n_time_before,
+            n_time_after,
+        )
+
     time_idx, doy_all, hour_all = build_time_index(ds_rsds[time_name], years, months)
     lats = ds_rsds[lat_name].values.astype(np.float32)
     lons = ds_rsds[lon_name].values.astype(np.float32)

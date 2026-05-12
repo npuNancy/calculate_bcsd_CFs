@@ -175,6 +175,31 @@ def find_coord_name(ds: xr.Dataset, candidates: Iterable[str]) -> str:
     raise KeyError(f"找不到坐标名，候选：{list(candidates)}；数据维度：{list(ds.dims)}")
 
 
+def rename_coords_to_match(
+    ds: xr.Dataset,
+    target_time: str,
+    target_lat: str,
+    target_lon: str,
+) -> xr.Dataset:
+    """把另一个数据集的 time/lat/lon 坐标名改成与主数据集一致。"""
+    src_time = find_coord_name(ds, ["time", "valid_time"])
+    src_lat = find_coord_name(ds, ["lat", "latitude"])
+    src_lon = find_coord_name(ds, ["lon", "longitude"])
+
+    rename_map = {}
+    if src_time != target_time:
+        rename_map[src_time] = target_time
+    if src_lat != target_lat:
+        rename_map[src_lat] = target_lat
+    if src_lon != target_lon:
+        rename_map[src_lon] = target_lon
+
+    if rename_map:
+        ds = ds.rename(rename_map)
+
+    return ds
+
+
 def wind_to_ms(arr: np.ndarray, units: str | None) -> np.ndarray:
     """把风速转换为 m s-1。BCSD uas/vas 通常已经是 m s-1。"""
     x = arr.astype(np.float32, copy=False)
@@ -392,14 +417,52 @@ def compute_region_wind_cf(
     lat_name = find_coord_name(ds_uas, ["lat", "latitude"])
     lon_name = find_coord_name(ds_uas, ["lon", "longitude"])
 
-    # 简单检查 vas 与 uas 的维度兼容性。
-    for coord_name in [time_name, lat_name, lon_name]:
-        if coord_name not in ds_vas.coords and coord_name not in ds_vas.dims:
-            raise KeyError(f"vas 文件中找不到坐标/维度 {coord_name}。")
-    if ds_uas[uas_var].sizes != ds_vas[vas_var].sizes:
-        logger.warning("uas 与 vas 变量尺寸不完全一致：uas=%s, vas=%s", ds_uas[uas_var].sizes, ds_vas[vas_var].sizes)
+    # 让 vas 的坐标名与 uas 保持一致，避免一个叫 time、另一个叫 valid_time。
+    ds_vas = rename_coords_to_match(
+        ds_vas,
+        target_time=time_name,
+        target_lat=lat_name,
+        target_lon=lon_name,
+    )
 
+    # 记录对齐前尺寸，便于日志检查。
+    sizes_before = {
+        "uas": dict(ds_uas[uas_var].sizes),
+        "vas": dict(ds_vas[vas_var].sizes),
+    }
+
+    # 关键修复：uas/vas 先按公共 time/lat/lon 取交集。
+    # 这样即使某个变量少了最后一个时间步，也不会出现 isel 越界。
+    ds_uas, ds_vas = xr.align(
+        ds_uas,
+        ds_vas,
+        join="inner",
+        copy=False,
+    )
+
+    sizes_after = {
+        "uas": dict(ds_uas[uas_var].sizes),
+        "vas": dict(ds_vas[vas_var].sizes),
+    }
+
+    if sizes_before != sizes_after:
+        logger.warning(
+            "uas/vas 时间或空间坐标不完全一致，已按公共坐标取交集：before=%s, after=%s",
+            sizes_before,
+            sizes_after,
+        )
+
+    # 对齐后再检查尺寸。
+    if ds_uas[uas_var].sizes != ds_vas[vas_var].sizes:
+        raise ValueError(f"uas 与 vas 对齐后尺寸仍不一致：uas={ds_uas[uas_var].sizes}, " f"vas={ds_vas[vas_var].sizes}")
+
+    # 固定变量维度顺序，避免某些文件维度顺序不同。
+    uas_da = ds_uas[uas_var].transpose(time_name, lat_name, lon_name)
+    vas_da = ds_vas[vas_var].transpose(time_name, lat_name, lon_name)
+
+    # 对齐之后，再生成 time_idx。
     time_idx = build_time_index(ds_uas[time_name], years, months)
+
     lats = ds_uas[lat_name].values.astype(np.float32)
     lons = ds_uas[lon_name].values.astype(np.float32)
 
