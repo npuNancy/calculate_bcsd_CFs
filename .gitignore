@@ -6,6 +6,8 @@ outputs/
 test.ipynb
 run_all_solar.sh
 run_all_wind.sh
+run_all_solar*.sh
+run_all_wind*.sh
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

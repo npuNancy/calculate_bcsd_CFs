@@ -38,13 +38,13 @@ for region in regions:
         cmd_wind_list.append(cmd_wind)
         cmd_solar_list.append(cmd_solar)
 
-with open("run_all_wind.sh", "w") as f_wind:
+with open(f"run_all_wind_{model}.sh", "w") as f_wind:
     f_wind.write("#!/bin/bash\n\n")
     f_wind.write("set -e\nset -x\n\n")
     for cmd in cmd_wind_list:
         f_wind.write(cmd + "\n")
 
-with open("run_all_solar.sh", "w") as f_solar:
+with open(f"run_all_solar_{model}.sh", "w") as f_solar:
     f_solar.write("#!/bin/bash\n\n")
     f_solar.write("set -e\nset -x\n\n")
     for cmd in cmd_solar_list:
