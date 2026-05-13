@@ -151,7 +151,7 @@ def find_bcsd_file(data_dir: str | Path, model: str, region: str, scenario: str,
     if not files:
         raise FileNotFoundError(f"找不到 {var} 文件。已尝试：\n  " + "\n  ".join(patterns))
     if len(files) > 1:
-        logger.warning("%s 匹配到多个文件，将使用第一个：%s", var, files[0])
+        logger.warning(f"{var} 匹配到多个文件，将使用第一个：{files[0]}")
     return Path(files[0])
 
 
@@ -400,17 +400,18 @@ def build_time_index(
     return idx, doy, hour_decimal
 
 
+
 def _coord_values_close(a: np.ndarray, b: np.ndarray, name: str) -> bool:
     """检查空间坐标是否一致。"""
     if a.shape != b.shape:
-        logger.error("%s 坐标长度不一致：%s vs %s", name, a.shape, b.shape)
+        logger.error(f"{name} 坐标长度不一致：{a.shape} vs {b.shape}")
         return False
     if np.issubdtype(a.dtype, np.number) and np.issubdtype(b.dtype, np.number):
         ok = np.allclose(a, b, rtol=0.0, atol=1e-6, equal_nan=True)
     else:
         ok = np.array_equal(a, b)
     if not ok:
-        logger.error("%s 坐标值不一致，当前脚本不做空间插值。", name)
+        logger.error(f"{name} 坐标值不一致，当前脚本不做空间插值。")
     return ok
 
 
@@ -614,16 +615,16 @@ def compute_region_solar_cf(
     uas_file = find_bcsd_file(data_dir, model, region, scenario, "uas")
     vas_file = find_bcsd_file(data_dir, model, region, scenario, "vas")
 
-    logger.info("rsds: %s", rsds_file)
-    logger.info("tas : %s", tas_file)
-    logger.info("uas : %s", uas_file)
-    logger.info("vas : %s", vas_file)
+    logger.info(f"rsds: {rsds_file}")
+    logger.info(f"tas : {tas_file}")
+    logger.info(f"uas : {uas_file}")
+    logger.info(f"vas : {vas_file}")
 
     out_file = (
         Path(output_dir) / model / region / f"solar_CF_{region}_{model}_{scenario}_{years}_{months_tag(months)}.nc"
     )
     if out_file.exists() and not overwrite:
-        logger.info("✓ 已存在，跳过：%s", out_file)
+        logger.info(f"✓ 已存在，跳过：{out_file}")
         return out_file
 
     ds_rsds = xr.open_dataset(rsds_file)
@@ -640,8 +641,7 @@ def compute_region_solar_cf(
     lat_name = find_coord_name(ds_rsds, ["lat", "latitude"])
     lon_name = find_coord_name(ds_rsds, ["lon", "longitude"])
 
-    # 以 rsds 的半点时间轴为主。 将 tas/uas/vas 线性插值到 rsds 时间轴，边界用最近值填充。
-    # 这样可以避免严格时间交集导致的时间步丢失，同时保持与 rsds 的时间对齐。
+    # 方案4：以 rsds 的半点时间轴为主。
     # 不再对四个变量做 join="inner" 的严格时间交集，否则 01:30 与 03:00 不重合会导致时间步丢失。
     # tas/uas/vas 是瞬时变量，后续在每个时间块内线性插值到 rsds.time。
     validate_same_spatial_grid(
@@ -657,7 +657,7 @@ def compute_region_solar_cf(
         "uas": ds_uas.sizes[time_name],
         "vas": ds_vas.sizes[time_name],
     }
-    logger.info("输入时间步数量：%s", n_time_before)
+    logger.info(f"输入时间步数量：{n_time_before}")
     logger.info("时间对齐策略：保留 rsds.time，将 tas/uas/vas 线性插值到 rsds.time（边界用最近值）。")
 
     time_idx, doy_all, hour_all = build_time_index(ds_rsds[time_name], years, months)
@@ -667,7 +667,7 @@ def compute_region_solar_cf(
     n_time = len(time_idx)
     nlat = len(lats)
     nlon = len(lons)
-    logger.info("匹配时间步: %d；空间维度: lat=%d, lon=%d", n_time, nlat, nlon)
+    logger.info(f"匹配时间步: {n_time}；空间维度: lat={nlat}, lon={nlon}")
 
     attrs = {
         "model": model,
@@ -701,7 +701,7 @@ def compute_region_solar_cf(
     rsds_units = ds_rsds[rsds_var].attrs.get("units", "")
     tas_units = ds_tas[tas_var].attrs.get("units", "")
 
-    logger.info("开始分块计算，chunk_time=%d", chunk_time)
+    logger.info(f"开始分块计算，chunk_time={chunk_time}")
     out_start = 0
     try:
         for start in tqdm(range(0, n_time, chunk_time), desc=f"{region}-{scenario}", unit="块"):
@@ -749,7 +749,7 @@ def compute_region_solar_cf(
         ds_uas.close()
         ds_vas.close()
 
-    logger.info("✓ 已保存：%s", out_file)
+    logger.info(f"✓ 已保存：{out_file}")
     return out_file
 
 
@@ -776,11 +776,11 @@ def main() -> None:
     else:
         regions = [args.region]
 
-    logger.info("待处理 region 数量：%d", len(regions))
+    logger.info(f"待处理 region 数量：{len(regions)}")
     for i, region in enumerate(regions, 1):
-        logger.info("\n%s", "=" * 80)
-        logger.info("[%d/%d] model=%s, region=%s, scenario=%s", i, len(regions), args.model, region, args.scenario)
-        logger.info("%s", "=" * 80)
+        logger.info(f"\n{'=' * 80}")
+        logger.info(f"[{i}/{len(regions)}] model={args.model}, region={region}, scenario={args.scenario}")
+        logger.info(f"{'=' * 80}")
         compute_region_solar_cf(
             data_dir=args.data_dir,
             model=args.model,

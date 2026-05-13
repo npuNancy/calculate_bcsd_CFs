@@ -151,7 +151,7 @@ def find_bcsd_file(data_dir: str | Path, model: str, region: str, scenario: str,
     if not files:
         raise FileNotFoundError(f"找不到 {var} 文件。已尝试：\n  " + "\n  ".join(patterns))
     if len(files) > 1:
-        logger.warning("%s 匹配到多个文件，将使用第一个：%s", var, files[0])
+        logger.warning(f"{var} 匹配到多个文件，将使用第一个：{files[0]}")
     return Path(files[0])
 
 
@@ -397,14 +397,14 @@ def compute_region_wind_cf(
     uas_file = find_bcsd_file(data_dir, model, region, scenario, "uas")
     vas_file = find_bcsd_file(data_dir, model, region, scenario, "vas")
 
-    logger.info("uas: %s", uas_file)
-    logger.info("vas: %s", vas_file)
+    logger.info(f"uas: {uas_file}")
+    logger.info(f"vas: {vas_file}")
 
     out_file = (
         Path(output_dir) / model / region / f"wind_CF_{region}_{model}_{scenario}_{years}_{months_tag(months)}.nc"
     )
     if out_file.exists() and not overwrite:
-        logger.info("✓ 已存在，跳过：%s", out_file)
+        logger.info(f"✓ 已存在，跳过：{out_file}")
         return out_file
 
     ds_uas = xr.open_dataset(uas_file)
@@ -447,9 +447,7 @@ def compute_region_wind_cf(
 
     if sizes_before != sizes_after:
         logger.warning(
-            "uas/vas 时间或空间坐标不完全一致，已按公共坐标取交集：before=%s, after=%s",
-            sizes_before,
-            sizes_after,
+            f"uas/vas 时间或空间坐标不完全一致，已按公共坐标取交集：before={sizes_before}, after={sizes_after}"
         )
 
     # 对齐后再检查尺寸。
@@ -469,18 +467,14 @@ def compute_region_wind_cf(
     n_time = len(time_idx)
     nlat = len(lats)
     nlon = len(lons)
-    logger.info("匹配时间步: %d；空间维度: lat=%d, lon=%d", n_time, nlat, nlon)
+    logger.info(f"匹配时间步: {n_time}；空间维度: lat={nlat}, lon={nlon}")
 
     ws_curve, pw_curve, rated_kw = _get_power_curve_arrays()
     extrap_ratio = power_law_ratio()
     logger.info(
-        "风速外推: Vhub=V10*(%.1f/%.1f)^%.6f，ratio=%.4f",
-        HUB_HEIGHT,
-        REF_HEIGHT,
-        POWER_LAW_ALPHA,
-        float(extrap_ratio),
+        f"风速外推: Vhub=V10*({HUB_HEIGHT:.1f}/{REF_HEIGHT:.1f})^{POWER_LAW_ALPHA:.6f}，ratio={float(extrap_ratio):.4f}"
     )
-    logger.info("风机: %s；rated=%.1f kW；cut-out=%.1f m/s", TURBINE_TYPE, rated_kw, CUT_OUT)
+    logger.info(f"风机: {TURBINE_TYPE}；rated={rated_kw:.1f} kW；cut-out={CUT_OUT:.1f} m/s")
 
     attrs = {
         "model": model,
@@ -524,7 +518,7 @@ def compute_region_wind_cf(
     positive_count = 0
     max_cf = 0.0
 
-    logger.info("开始分块计算，chunk_time=%d", chunk_time)
+    logger.info(f"开始分块计算，chunk_time={chunk_time}")
     out_start = 0
     try:
         for start in tqdm(range(0, n_time, chunk_time), desc=f"{region}-{scenario}", unit="块"):
@@ -568,13 +562,13 @@ def compute_region_wind_cf(
         ds_uas.close()
         ds_vas.close()
 
-    logger.info("✓ 已保存：%s", out_file)
+    logger.info(f"✓ 已保存：{out_file}")
     if total_count:
-        logger.info("  整体平均 CF   : %.4f", total_sum / total_count)
-        logger.info("  全局最大 CF   : %.4f", max_cf)
-        logger.info("  有风时段占比  : %.2f%%", 100.0 * positive_count / total_count)
+        logger.info(f"  整体平均 CF   : {total_sum / total_count:.4f}")
+        logger.info(f"  全局最大 CF   : {max_cf:.4f}")
+        logger.info(f"  有风时段占比  : {100.0 * positive_count / total_count:.2f}%")
     if positive_count:
-        logger.info("  有风时段平均 CF: %.4f", positive_sum / positive_count)
+        logger.info(f"  有风时段平均 CF: {positive_sum / positive_count:.4f}")
 
     return out_file
 
@@ -602,11 +596,11 @@ def main() -> None:
     else:
         regions = [args.region]
 
-    logger.info("待处理 region 数量：%d", len(regions))
+    logger.info(f"待处理 region 数量：{len(regions)}")
     for i, region in enumerate(regions, 1):
-        logger.info("\n%s", "=" * 80)
-        logger.info("[%d/%d] model=%s, region=%s, scenario=%s", i, len(regions), args.model, region, args.scenario)
-        logger.info("%s", "=" * 80)
+        logger.info(f"\n{'=' * 80}")
+        logger.info(f"[{i}/{len(regions)}] model={args.model}, region={region}, scenario={args.scenario}")
+        logger.info(f"{'=' * 80}")
         compute_region_wind_cf(
             data_dir=args.data_dir,
             model=args.model,
