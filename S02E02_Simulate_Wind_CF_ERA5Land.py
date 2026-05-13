@@ -166,7 +166,9 @@ def prepare_dataarray(
     return da.transpose(time_name, lat_name, lon_name)
 
 
-def validate_same_grid(ref: xr.Dataset, other: xr.Dataset, name: str, time_name: str, lat_name: str, lon_name: str) -> None:
+def validate_same_grid(
+    ref: xr.Dataset, other: xr.Dataset, name: str, time_name: str, lat_name: str, lon_name: str
+) -> None:
     """检查两个数据集是否在同一时间和空间网格上。"""
     if not np.array_equal(ref[time_name].values, other[time_name].values):
         raise ValueError(f"{name} 与 u10 的时间坐标不一致。ERA5-Land 月文件应逐小时完全一致。")
@@ -401,7 +403,9 @@ def compute_month_wind_cf(
     lats = ds_u10[lat_name].values.astype(np.float32)
     lons = ds_u10[lon_name].values.astype(np.float32)
     logger.info(f"维度：time={n_time}, lat={len(lats)}, lon={len(lons)}")
-    logger.info(f"风速外推：Vhub=V10*({HUB_HEIGHT:.1f}/{REF_HEIGHT:.1f})^{POWER_LAW_ALPHA:.6f}，ratio={float(extrap_ratio):.4f}")
+    logger.info(
+        f"风速外推：Vhub=V10*({HUB_HEIGHT:.1f}/{REF_HEIGHT:.1f})^{POWER_LAW_ALPHA:.6f}，ratio={float(extrap_ratio):.4f}"
+    )
     logger.info(f"风机：{TURBINE_TYPE}；rated={rated_kw:.1f} kW；cut-out={CUT_OUT:.1f} m/s")
     logger.info("输出坐标统一为：time/lat/lon；变量名：wind_cf")
 
@@ -538,3 +542,8 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+"""
+使用方法示例：
+python S02E02_Simulate_Wind_CF_ERA5Land.py --data_dir data --years 2015-2025 
+"""

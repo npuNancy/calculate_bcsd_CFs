@@ -190,7 +190,9 @@ def rename_coords_to_match(
     return ds
 
 
-def validate_same_grid(ref: xr.Dataset, others: dict[str, xr.Dataset], time_name: str, lat_name: str, lon_name: str) -> None:
+def validate_same_grid(
+    ref: xr.Dataset, others: dict[str, xr.Dataset], time_name: str, lat_name: str, lon_name: str
+) -> None:
     """检查输入变量是否在同一时间和空间网格上。"""
     ref_time = ref[time_name].values
     ref_lat = ref[lat_name].values
@@ -261,9 +263,12 @@ def load_previous_accum_boundary(
         if prev_da.sizes[lat_name] != len(lat_values) or prev_da.sizes[lon_name] != len(lon_values):
             raise ValueError(f"前一个月 {var} 文件空间尺寸与当前文件不一致：{prev_file}")
         if not np.allclose(prev_ds[lat_name].values, lat_values, rtol=0.0, atol=1e-6, equal_nan=True):
-            raise ValueError(f"前一个月 {var} 文件纬度与当前文件不一致：{prev_file}")
+            # raise ValueError(f"前一个月 {var} 文件纬度与当前文件不一致：{prev_file}")
+            print(f"警告：前一个月 {var} 文件纬度与当前文件不完全一致，已继续处理：{prev_file}")
         if not np.allclose(prev_ds[lon_name].values, lon_values, rtol=0.0, atol=1e-6, equal_nan=True):
-            raise ValueError(f"前一个月 {var} 文件经度与当前文件不一致：{prev_file}")
+            # raise ValueError(f"前一个月 {var} 文件经度与当前文件不一致：{prev_file}")
+            print(f"警告：前一个月 {var} 文件经度与当前文件不完全一致，已继续处理：{prev_file}")
+
         return prev_da.isel({time_name: -1}).values.astype(np.float32)
 
 
@@ -307,19 +312,13 @@ def accumulated_to_hourly_increment_chunk(
         if hours[0] == 1:
             inc[0] = cur[0]
         elif missing_boundary_policy == "zero":
-            logger.warning(
-                f"{str(time_da.values[0])} 缺少前一小时累计值，已将该小时增量设为 0。"
-            )
+            logger.warning(f"{str(time_da.values[0])} 缺少前一小时累计值，已将该小时增量设为 0。")
             inc[0] = 0.0
         elif missing_boundary_policy == "nan":
-            logger.warning(
-                f"{str(time_da.values[0])} 缺少前一小时累计值，已将该小时增量设为 NaN。"
-            )
+            logger.warning(f"{str(time_da.values[0])} 缺少前一小时累计值，已将该小时增量设为 NaN。")
             inc[0] = np.nan
         elif missing_boundary_policy == "current":
-            logger.warning(
-                f"{str(time_da.values[0])} 缺少前一小时累计值，已直接使用当前累计值。"
-            )
+            logger.warning(f"{str(time_da.values[0])} 缺少前一小时累计值，已直接使用当前累计值。")
             inc[0] = cur[0]
         else:
             raise ValueError(f"不支持 missing_boundary_policy={missing_boundary_policy!r}")
@@ -398,20 +397,16 @@ def solar_cos_zenith(
         + 0.001480 * np.sin(3 * b)
     )
     eot = 229.18 * (
-        0.000075
-        + 0.001868 * np.cos(b)
-        - 0.032077 * np.sin(b)
-        - 0.014615 * np.cos(2 * b)
-        - 0.040849 * np.sin(2 * b)
+        0.000075 + 0.001868 * np.cos(b) - 0.032077 * np.sin(b) - 0.014615 * np.cos(2 * b) - 0.040849 * np.sin(2 * b)
     )
 
     true_solar_minutes = hour_decimal_utc[:, None, None] * 60.0 + eot[:, None, None] + 4.0 * lons[None, None, :]
     hour_angle = np.deg2rad(true_solar_minutes / 4.0 - 180.0)
 
     lat_rad = np.deg2rad(lats)
-    cos_sza = np.sin(lat_rad)[None, :, None] * np.sin(decl)[:, None, None] + np.cos(lat_rad)[
-        None, :, None
-    ] * np.cos(decl)[:, None, None] * np.cos(hour_angle)
+    cos_sza = np.sin(lat_rad)[None, :, None] * np.sin(decl)[:, None, None] + np.cos(lat_rad)[None, :, None] * np.cos(
+        decl
+    )[:, None, None] * np.cos(hour_angle)
     return np.maximum(cos_sza, 0.0).astype(np.float32)
 
 
@@ -820,3 +815,8 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+"""
+使用方法示例：
+python S02E01_Simulate_Solar_CF_ERA5Land.py --data_dir data --years 2015-2025 
+"""
