@@ -9,6 +9,8 @@ run_all_wind.sh
 run_all_solar*.sh
 run_all_wind*.sh
 
+figs/
+
 .vscode
 
 # Byte-compiled / optimized / DLL files
