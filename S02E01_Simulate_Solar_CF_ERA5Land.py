@@ -781,7 +781,7 @@ def main() -> None:
     parser.add_argument("--data_dir", default="data", help="数据根目录，例如 data")
     parser.add_argument("--years", default="2015-2024", help="年段 YYYY-YYYY 或 YYYY，包含两端")
     parser.add_argument("--months", default="", help="逗号分隔月份；默认全年 1-12")
-    parser.add_argument("--output_dir", default="output/CFs_of_solar", help="输出目录")
+    parser.add_argument("--output_dir", default="output/CFs_of_solar_ERA5Land", help="输出目录")
     parser.add_argument("--chunk_time", type=int, default=24, help="每块处理的小时数；全球 0.1° 数据建议 12-48")
     parser.add_argument("--compress_level", type=int, default=4, help="NetCDF 压缩级别 0-9")
     parser.add_argument("--overwrite", action="store_true", help="若输出文件已存在，则覆盖重算")
