@@ -294,8 +294,7 @@ def solar_cos_zenith_2d(
     )
 
     eot = 229.18 * (
-        0.000075 + 0.001868 * np.cos(b) - 0.032077 * np.sin(b)
-        - 0.014615 * np.cos(2 * b) - 0.040849 * np.sin(2 * b)
+        0.000075 + 0.001868 * np.cos(b) - 0.032077 * np.sin(b) - 0.014615 * np.cos(2 * b) - 0.040849 * np.sin(2 * b)
     )
 
     # 二维广播：time 维在最前，lat/lon 是二维数组
@@ -303,10 +302,9 @@ def solar_cos_zenith_2d(
     hour_angle = np.deg2rad(true_solar_minutes / 4.0 - 180.0)
 
     lat_rad = np.deg2rad(lats)
-    cos_sza = (
-        np.sin(lat_rad)[None, :, :] * np.sin(decl)[:, None, None]
-        + np.cos(lat_rad)[None, :, :] * np.cos(decl)[:, None, None] * np.cos(hour_angle)
-    )
+    cos_sza = np.sin(lat_rad)[None, :, :] * np.sin(decl)[:, None, None] + np.cos(lat_rad)[None, :, :] * np.cos(decl)[
+        :, None, None
+    ] * np.cos(hour_angle)
     return np.maximum(cos_sza, 0.0).astype(np.float32)
 
 
@@ -660,7 +658,9 @@ def compute_nam12_solar_cf(
     logger.info(f"待处理年份：{common_years[0]}-{common_years[-1]}，共 {len(common_years)} 年")
 
     out_file = (
-        Path(output_dir) / gcm_model / realization
+        Path(output_dir)
+        / gcm_model
+        / realization
         / f"solar_CF_NAM-12_{gcm_model}_{realization}_{rcm_model}_{scenario}_{years}_{months_tag(months)}.nc"
     )
     if out_file.exists() and not overwrite:
