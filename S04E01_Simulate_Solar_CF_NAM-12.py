@@ -429,7 +429,7 @@ def _datetime64_to_ns(values: np.ndarray) -> np.ndarray:
     if arr.dtype == object and arr.size > 0 and isinstance(arr.flat[0], cftime.datetime):
         # cftime 类型：转为距离第一个时间点的微秒偏移量
         base = arr.flat[0]
-        return np.array([float(v - base) for v in arr.flat], dtype=np.float64)
+        return np.array([(v - base).total_seconds() for v in arr.flat], dtype=np.float64)
     return arr.astype(np.float64)
 
 
