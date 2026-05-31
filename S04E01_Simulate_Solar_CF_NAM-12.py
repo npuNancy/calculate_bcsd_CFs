@@ -422,11 +422,17 @@ def build_time_index(
 
 
 def _datetime64_to_ns(values: np.ndarray) -> np.ndarray:
-    """将 datetime64 坐标转换为 ns 整数。"""
+    """将时间坐标转换为数值（ns 整数或 cftime 天数），用于 searchsorted。"""
+    import cftime
+
     arr = np.asarray(values)
-    if not np.issubdtype(arr.dtype, np.datetime64):
-        return arr.astype(np.float64)
-    return arr.astype("datetime64[ns]").astype(np.int64)
+    if np.issubdtype(arr.dtype, np.datetime64):
+        return arr.astype("datetime64[ns]").astype(np.int64)
+    if arr.dtype == object and arr.size > 0 and isinstance(arr.flat[0], cftime.datetime):
+        # cftime 类型：转为距离第一个时间点的微秒偏移量
+        base = arr.flat[0]
+        return np.array([float(v - base) for v in arr.flat], dtype=np.float64)
+    return arr.astype(np.float64)
 
 
 def interp_instantaneous_to_target_times_chunk(
@@ -801,7 +807,14 @@ def compute_nam12_solar_cf(
             ds_vas.close()
             gc.collect()
 
-    finally:
+    except BaseException:
+        if nc.isopen():
+            nc.close()
+        if out_file.exists():
+            logger.error(f"计算出错，删除不完整的输出文件：{out_file}")
+            out_file.unlink()
+        raise
+    else:
         nc.close()
 
     logger.info(f"已保存：{out_file}")
