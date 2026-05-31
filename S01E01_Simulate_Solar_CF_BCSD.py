@@ -799,7 +799,7 @@ if __name__ == "__main__":
     main()
 
 """
-python S01E02_Simulate_Wind_CF_BCSD.py \
+python S01E01_Simulate_Solar_CF_BCSD.py \
   --data_dir data/bcsd_outputs \
   --model MIROC-ES2H \
   --region Austria \
