@@ -419,20 +419,149 @@ def create_output_file_rotated(
     return nc
 
 
+
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. 主计算函数
+# 4. 合并年度文件与单年计算
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def build_time_index(time_da: xr.DataArray, years: str, months: str) -> np.ndarray:
-    """根据 years/months 生成时间索引。"""
-    y0, y1 = parse_years(years)
-    month_list = parse_months(months)
-    mask = (time_da.dt.year >= y0) & (time_da.dt.year <= y1) & time_da.dt.month.isin(month_list)
-    idx = np.where(mask.values)[0]
-    if idx.size == 0:
-        raise ValueError(f"没有匹配到时间步：years={years}, months={months or 'all'}")
-    return idx
+def _merge_yearly_nc_files(
+    yearly_files: list[Path],
+    out_file: Path,
+    cf_var_name: str,
+    compress_level: int = 4,
+    chunk_time: int = 24,
+) -> Path:
+    """合并逐年 NC 文件为一个文件。"""
+    total_steps = 0
+    for f in yearly_files:
+        with Dataset(str(f), "r") as nc:
+            total_steps += nc.dimensions["time"].size
+    logger.info(f"合并 {len(yearly_files)} 个年度文件，总时间步：{total_steps}")
+
+    nc_out = create_output_file_rotated(
+        out_file=out_file,
+        template_file=yearly_files[0],
+        total_time_steps=total_steps,
+        compress_level=compress_level,
+        chunk_time=chunk_time,
+    )
+    cf_var_out = nc_out.variables[cf_var_name]
+    tvar_out = nc_out.variables["time"]
+
+    offset = 0
+    for f in yearly_files:
+        with Dataset(str(f), "r") as nc_in:
+            n = nc_in.dimensions["time"].size
+            tvar_out[offset : offset + n] = nc_in.variables["time"][:]
+            cf_var_out[offset : offset + n, :, :] = nc_in.variables[cf_var_name][:, :, :]
+            offset += n
+
+    nc_out.close()
+    return out_file
+
+
+def _compute_wind_cf_year(
+    yr: int,
+    uas_file: Path,
+    vas_file: Path,
+    yr_out_file: Path,
+    ws_curve: np.ndarray,
+    pw_curve: np.ndarray,
+    rated_kw: float,
+    extrap_ratio: np.float32,
+    chunk_time: int = 24,
+    compress_level: int = 4,
+) -> Path:
+    """计算单年风电 CF 并保存到独立 NC 文件。"""
+    ds_uas = xr.open_dataset(uas_file)
+    ds_vas = xr.open_dataset(vas_file)
+
+    time_name = find_coord_name(ds_uas, ["time"])
+    rlat_name = find_coord_name(ds_uas, ["rlat"])
+    rlon_name = find_coord_name(ds_uas, ["rlon"])
+
+    # 让 vas 的坐标名与 uas 一致
+    vas_time = find_coord_name(ds_vas, ["time"])
+    vas_rlat = find_coord_name(ds_vas, ["rlat"])
+    vas_rlon = find_coord_name(ds_vas, ["rlon"])
+    rename_map: dict[str, str] = {}
+    if vas_time != time_name:
+        rename_map[vas_time] = time_name
+    if vas_rlat != rlat_name:
+        rename_map[vas_rlat] = rlat_name
+    if vas_rlon != rlon_name:
+        rename_map[vas_rlon] = rlon_name
+    if rename_map:
+        ds_vas = ds_vas.rename(rename_map)
+
+    uas_da = prepare_dataarray(ds_uas, "uas", time_name, rlat_name, rlon_name)
+    vas_da = prepare_dataarray(ds_vas, "vas", time_name, rlat_name, rlon_name)
+
+    # 对齐
+    ds_uas_aligned, ds_vas_aligned = xr.align(ds_uas, ds_vas, join="inner", copy=False)
+    n_time = ds_uas_aligned.sizes[time_name]
+    if ds_uas_aligned.sizes[time_name] != ds_uas.sizes[time_name]:
+        uas_da = prepare_dataarray(ds_uas_aligned, "uas", time_name, rlat_name, rlon_name)
+        vas_da = prepare_dataarray(ds_vas_aligned, "vas", time_name, rlat_name, rlon_name)
+        logger.warning(f"{yr} 对齐后时间步变为 {n_time}")
+
+    uas_units = ds_uas[uas_da.name].attrs.get("units", "")
+    vas_units = ds_vas[vas_da.name].attrs.get("units", "")
+
+    logger.info(f"  处理 {yr}（{n_time} 步）...")
+
+    nc = create_output_file_rotated(
+        out_file=yr_out_file,
+        template_file=uas_file,
+        total_time_steps=n_time,
+        compress_level=compress_level,
+        chunk_time=chunk_time,
+    )
+    cf_var = nc.variables["wind_cf"]
+    tvar = nc.variables["time"]
+
+    try:
+        # 写入 time 值
+        raw = xr.open_dataset(uas_file, decode_times=False)
+        tvar[:n_time] = raw["time"].values[:n_time]
+        raw.close()
+
+        for start in tqdm(range(0, n_time, chunk_time), desc=f"wind-{yr}", unit="块"):
+            end = min(start + chunk_time, n_time)
+
+            uas_raw = uas_da.isel({time_name: slice(start, end)}).values
+            vas_raw = vas_da.isel({time_name: slice(start, end)}).values
+
+            uas_ms = wind_to_ms(uas_raw, uas_units)
+            vas_ms = wind_to_ms(vas_raw, vas_units)
+
+            cf_chunk = compute_wind_cf_chunk(uas_ms, vas_ms, ws_curve, pw_curve, rated_kw, extrap_ratio)
+
+            cf_var[start : end, :, :] = cf_chunk
+
+            del uas_raw, vas_raw, uas_ms, vas_ms, cf_chunk
+            gc.collect()
+    except BaseException:
+        if nc.isopen():
+            nc.close()
+        if yr_out_file.exists():
+            logger.error(f"{yr} 计算出错，删除：{yr_out_file}")
+            yr_out_file.unlink()
+        ds_uas.close()
+        ds_vas.close()
+        raise
+
+    nc.close()
+    ds_uas.close()
+    ds_vas.close()
+    gc.collect()
+    return yr_out_file
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. 主计算函数
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 def compute_nam12_wind_cf(
@@ -448,7 +577,7 @@ def compute_nam12_wind_cf(
     overwrite: bool = False,
     compress_level: int = 4,
 ) -> Path:
-    """计算 CORDEX NAM-12 陆上风电容量因子。"""
+    """计算 CORDEX NAM-12 陆上风电容量因子（逐年独立计算 + 合并）。"""
     y0, y1 = parse_years(years)
 
     uas_files = cordex_var_files(data_dir, gcm_model, realization, rcm_model, scenario, "uas", (y0, y1))
@@ -479,140 +608,49 @@ def compute_nam12_wind_cf(
     extrap_ratio = power_law_ratio()
     logger.info(f"风速外推 ratio={float(extrap_ratio):.4f}，风机 {TURBINE_TYPE}，rated={rated_kw:.1f} kW")
 
-    # 预扫描：计算总时间步
-    year_ntimes: dict[int, int] = {}
+    # 年度文件目录
+    yearly_dir = out_file.parent / "yearly"
+    yearly_dir.mkdir(parents=True, exist_ok=True)
+
+    # 逐年计算
+    yearly_files: list[Path] = []
     for yr in common_years:
-        ds_tmp = xr.open_dataset(uas_files[yr])
-        n = ds_tmp.sizes["time"]
-        ds_tmp.close()
-        year_ntimes[yr] = n
-    total_steps = sum(year_ntimes.values())
-    logger.info(f"总时间步：{total_steps}")
+        yr_file = (
+            yearly_dir
+            / f"wind_CF_NAM-12_{gcm_model}_{realization}_{rcm_model}_{scenario}_{yr}_{months_tag(months)}.nc"
+        )
+        if yr_file.exists() and not overwrite:
+            logger.info(f"  {yr} 已存在，跳过")
+            yearly_files.append(yr_file)
+            continue
 
-    # 创建输出文件
-    attrs = {
-        "gcm_model": gcm_model,
-        "realization": realization,
-        "rcm_model": rcm_model,
-        "scenario": scenario,
-        "years": years,
-        "months": months if months.strip() else "1-12",
-        "technology": "onshore wind",
-        "turbine_type": TURBINE_TYPE,
-        "hub_height_m": HUB_HEIGHT,
-        "reference_height_m": REF_HEIGHT,
-        "power_law_alpha": POWER_LAW_ALPHA,
-        "cut_out_speed_ms": CUT_OUT,
-        "data_source": "CMIP6-CORDEX NAM-12",
-    }
-    nc = create_output_file_rotated(
-        out_file=out_file,
-        template_file=uas_files[common_years[0]],
-        total_time_steps=total_steps,
-        compress_level=compress_level,
-        chunk_time=chunk_time,
-        attrs=attrs,
-    )
-    cf_var = nc.variables["wind_cf"]
-    tvar = nc.variables["time"]
-
-    global_out_offset = 0
-    total_sum = 0.0
-    total_count = 0
-    max_cf = 0.0
-
-    try:
-        for yr in common_years:
-            n_time = year_ntimes[yr]
-            logger.info(f"处理 {yr}（{n_time} 步）...")
-
-            ds_uas = xr.open_dataset(uas_files[yr])
-            ds_vas = xr.open_dataset(vas_files[yr])
-
-            time_name = find_coord_name(ds_uas, ["time"])
-            rlat_name = find_coord_name(ds_uas, ["rlat"])
-            rlon_name = find_coord_name(ds_uas, ["rlon"])
-
-            # 让 vas 的坐标名与 uas 一致
-            vas_time = find_coord_name(ds_vas, ["time"])
-            vas_rlat = find_coord_name(ds_vas, ["rlat"])
-            vas_rlon = find_coord_name(ds_vas, ["rlon"])
-            rename_map: dict[str, str] = {}
-            if vas_time != time_name:
-                rename_map[vas_time] = time_name
-            if vas_rlat != rlat_name:
-                rename_map[vas_rlat] = rlat_name
-            if vas_rlon != rlon_name:
-                rename_map[vas_rlon] = rlon_name
-            if rename_map:
-                ds_vas = ds_vas.rename(rename_map)
-
-            uas_da = prepare_dataarray(ds_uas, "uas", time_name, rlat_name, rlon_name)
-            vas_da = prepare_dataarray(ds_vas, "vas", time_name, rlat_name, rlon_name)
-
-            # 对齐
-            ds_uas_aligned, ds_vas_aligned = xr.align(
-                ds_uas, ds_vas, join="inner", copy=False,
+        logger.info(f"处理 {yr}...")
+        try:
+            _compute_wind_cf_year(
+                yr=yr,
+                uas_file=uas_files[yr],
+                vas_file=vas_files[yr],
+                yr_out_file=yr_file,
+                ws_curve=ws_curve,
+                pw_curve=pw_curve,
+                rated_kw=rated_kw,
+                extrap_ratio=extrap_ratio,
+                chunk_time=chunk_time,
+                compress_level=compress_level,
             )
-            if ds_uas_aligned.sizes[time_name] != n_time or ds_vas_aligned.sizes[time_name] != n_time:
-                n_time = min(ds_uas_aligned.sizes[time_name], ds_vas_aligned.sizes[time_name])
-                uas_da = prepare_dataarray(ds_uas_aligned, "uas", time_name, rlat_name, rlon_name)
-                vas_da = prepare_dataarray(ds_vas_aligned, "vas", time_name, rlat_name, rlon_name)
-                logger.warning(f"{yr} 对齐后时间步变为 {n_time}")
+        except Exception:
+            if yr_file.exists():
+                logger.error(f"{yr} 计算出错，删除：{yr_file}")
+                yr_file.unlink()
+            raise
+        yearly_files.append(yr_file)
 
-            # 写入该年的 time 值
-            raw = xr.open_dataset(uas_files[yr], decode_times=False)
-            tvar[global_out_offset : global_out_offset + n_time] = raw["time"].values[:n_time]
-            raw.close()
+    # 合并年度文件
+    logger.info(f"开始合并 {len(yearly_files)} 个年度文件...")
+    _merge_yearly_nc_files(yearly_files, out_file, "wind_cf", compress_level, chunk_time)
+    logger.info(f"已合并保存：{out_file}")
+    logger.info(f"可删除年度文件目录：{yearly_dir}")
 
-            uas_units = ds_uas[uas_da.name].attrs.get("units", "")
-            vas_units = ds_vas[vas_da.name].attrs.get("units", "")
-
-            year_out_offset = 0
-            for start in tqdm(range(0, n_time, chunk_time), desc=f"wind-{yr}", unit="块"):
-                end = min(start + chunk_time, n_time)
-
-                uas_raw = uas_da.isel({time_name: slice(start, end)}).values
-                vas_raw = vas_da.isel({time_name: slice(start, end)}).values
-
-                uas_ms = wind_to_ms(uas_raw, uas_units)
-                vas_ms = wind_to_ms(vas_raw, vas_units)
-
-                cf_chunk = compute_wind_cf_chunk(uas_ms, vas_ms, ws_curve, pw_curve, rated_kw, extrap_ratio)
-
-                out_start = global_out_offset + year_out_offset
-                cf_var[out_start : out_start + (end - start), :, :] = cf_chunk
-                year_out_offset += end - start
-
-                finite = np.isfinite(cf_chunk)
-                if np.any(finite):
-                    vals = cf_chunk[finite]
-                    total_sum += float(vals.sum(dtype=np.float64))
-                    total_count += int(vals.size)
-                    max_cf = max(max_cf, float(vals.max()))
-
-                del uas_raw, vas_raw, uas_ms, vas_ms, cf_chunk
-                gc.collect()
-
-            global_out_offset += year_out_offset
-            ds_uas.close()
-            ds_vas.close()
-            gc.collect()
-
-    except BaseException:
-        if nc.isopen():
-            nc.close()
-        if out_file.exists():
-            logger.error(f"计算出错，删除不完整的输出文件：{out_file}")
-            out_file.unlink()
-        raise
-    else:
-        nc.close()
-
-    logger.info(f"已保存：{out_file}")
-    if total_count:
-        logger.info(f"  整体平均 CF: {total_sum / total_count:.4f}")
-        logger.info(f"  全局最大 CF: {max_cf:.4f}")
     return out_file
 
 

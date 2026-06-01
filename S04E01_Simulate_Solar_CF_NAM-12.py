@@ -621,7 +621,164 @@ def create_output_file_rotated(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 6. 主计算函数
+# 6. 合并年度文件与单年计算
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _merge_yearly_nc_files(
+    yearly_files: list[Path],
+    out_file: Path,
+    cf_var_name: str,
+    compress_level: int = 4,
+    chunk_time: int = 24,
+) -> Path:
+    """合并逐年 NC 文件为一个文件。"""
+    total_steps = 0
+    for f in yearly_files:
+        with Dataset(str(f), "r") as nc:
+            total_steps += nc.dimensions["time"].size
+    logger.info(f"合并 {len(yearly_files)} 个年度文件，总时间步：{total_steps}")
+
+    nc_out = create_output_file_rotated(
+        out_file=out_file,
+        template_file=yearly_files[0],
+        total_time_steps=total_steps,
+        compress_level=compress_level,
+        chunk_time=chunk_time,
+    )
+    cf_var_out = nc_out.variables[cf_var_name]
+    tvar_out = nc_out.variables["time"]
+
+    offset = 0
+    for f in yearly_files:
+        with Dataset(str(f), "r") as nc_in:
+            n = nc_in.dimensions["time"].size
+            tvar_out[offset : offset + n] = nc_in.variables["time"][:]
+            cf_var_out[offset : offset + n, :, :] = nc_in.variables[cf_var_name][:, :, :]
+            offset += n
+
+    nc_out.close()
+    return out_file
+
+
+def _compute_solar_cf_year(
+    yr: int,
+    rsds_file: Path,
+    tas_file: Path,
+    uas_file: Path,
+    vas_file: Path,
+    yr_out_file: Path,
+    lat_2d: np.ndarray,
+    lon_2d: np.ndarray,
+    months: str,
+    chunk_time: int = 24,
+    compress_level: int = 4,
+) -> Path:
+    """计算单年光伏 CF 并保存到独立 NC 文件。"""
+    ds_rsds = xr.open_dataset(rsds_file)
+    ds_tas = xr.open_dataset(tas_file)
+    ds_uas = xr.open_dataset(uas_file)
+    ds_vas = xr.open_dataset(vas_file)
+
+    time_name = find_coord_name(ds_rsds, ["time"])
+    rlat_name = find_coord_name(ds_rsds, ["rlat"])
+    rlon_name = find_coord_name(ds_rsds, ["rlon"])
+
+    rsds_da = prepare_dataarray(ds_rsds, "rsds", time_name, rlat_name, rlon_name)
+    tas_da = prepare_dataarray(ds_tas, "tas", time_name, rlat_name, rlon_name)
+    uas_da = prepare_dataarray(ds_uas, "uas", time_name, rlat_name, rlon_name)
+    vas_da = prepare_dataarray(ds_vas, "vas", time_name, rlat_name, rlon_name)
+
+    logger.info(f"  rsds time: {ds_rsds[time_name].values[0]} ~ {ds_rsds[time_name].values[-1]}")
+    logger.info(f"  tas  time: {ds_tas[time_name].values[0]} ~ {ds_tas[time_name].values[-1]}")
+
+    rsds_units = ds_rsds[rsds_da.name].attrs.get("units", "")
+    tas_units = ds_tas[tas_da.name].attrs.get("units", "")
+    uas_units = ds_uas[uas_da.name].attrs.get("units", "")
+    vas_units = ds_vas[vas_da.name].attrs.get("units", "")
+
+    n_time = ds_rsds.sizes[time_name]
+    time_idx, doy_all, hour_all = build_time_index(ds_rsds[time_name], str(yr), months)
+    n_selected = len(time_idx)
+    logger.info(f"  匹配时间步：{n_selected}/{n_time}")
+
+    nc = create_output_file_rotated(
+        out_file=yr_out_file,
+        template_file=rsds_file,
+        total_time_steps=n_selected,
+        compress_level=compress_level,
+        chunk_time=chunk_time,
+    )
+    cf_var = nc.variables["solar_cf"]
+    tvar = nc.variables["time"]
+
+    try:
+        raw = xr.open_dataset(rsds_file, decode_times=False)
+        tvar[:n_selected] = raw["time"].values[time_idx]
+        raw.close()
+
+        out_offset = 0
+        for start in tqdm(range(0, n_selected, chunk_time), desc=f"solar-{yr}", unit="块"):
+            end = min(start + chunk_time, n_selected)
+            idx_chunk = time_idx[start:end]
+
+            target_times = ds_rsds[time_name].isel({time_name: idx_chunk}).values
+
+            rsds_raw = rsds_da.isel({time_name: idx_chunk}).values
+            tas_raw = interp_instantaneous_to_target_times_chunk(
+                tas_da, time_name, target_times, fill_boundary="nearest"
+            )
+            uas_raw = interp_instantaneous_to_target_times_chunk(
+                uas_da, time_name, target_times, fill_boundary="nearest"
+            )
+            vas_raw = interp_instantaneous_to_target_times_chunk(
+                vas_da, time_name, target_times, fill_boundary="nearest"
+            )
+
+            rsds_kw = to_kw_m2(rsds_raw, rsds_units)
+            tas_c = tas_to_celsius(tas_raw, tas_units)
+            uas_ms = wind_to_ms(uas_raw, uas_units)
+            vas_ms = wind_to_ms(vas_raw, vas_units)
+
+            cf_chunk = compute_solar_cf_chunk(
+                rsds_kw=rsds_kw,
+                tas_c=tas_c,
+                uas=uas_ms,
+                vas=vas_ms,
+                doy=doy_all[start:end],
+                hour_decimal_utc=hour_all[start:end],
+                lats=lat_2d,
+                lons=lon_2d,
+            )
+
+            cf_var[out_offset : out_offset + (end - start), :, :] = cf_chunk
+            out_offset += end - start
+
+            del rsds_raw, tas_raw, uas_raw, vas_raw, rsds_kw, tas_c, uas_ms, vas_ms, cf_chunk
+            gc.collect()
+    except BaseException:
+        if nc.isopen():
+            nc.close()
+        if yr_out_file.exists():
+            logger.error(f"{yr} 计算出错，删除：{yr_out_file}")
+            yr_out_file.unlink()
+        ds_rsds.close()
+        ds_tas.close()
+        ds_uas.close()
+        ds_vas.close()
+        raise
+
+    nc.close()
+    ds_rsds.close()
+    ds_tas.close()
+    ds_uas.close()
+    ds_vas.close()
+    gc.collect()
+    return yr_out_file
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 7. 主计算函数
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -638,7 +795,7 @@ def compute_nam12_solar_cf(
     overwrite: bool = False,
     compress_level: int = 4,
 ) -> Path:
-    """计算 CORDEX NAM-12 光伏容量因子。"""
+    """计算 CORDEX NAM-12 光伏容量因子（逐年独立计算 + 合并）。"""
     y0, y1 = parse_years(years)
 
     rsds_files = cordex_var_files(data_dir, gcm_model, realization, rcm_model, scenario, "rsds", (y0, y1))
@@ -667,160 +824,57 @@ def compute_nam12_solar_cf(
         logger.info(f"已存在，跳过：{out_file}")
         return out_file
 
-    # 预扫描总时间步
-    year_ntimes: dict[int, int] = {}
-    for yr in common_years:
-        ds_tmp = xr.open_dataset(rsds_files[yr])
-        n = ds_tmp.sizes["time"]
-        ds_tmp.close()
-        year_ntimes[yr] = n
-    total_steps = sum(year_ntimes.values())
-    logger.info(f"总时间步：{total_steps}")
+    # 年度文件目录
+    yearly_dir = out_file.parent / "yearly"
+    yearly_dir.mkdir(parents=True, exist_ok=True)
 
-    # 加载网格坐标（从第一个 rsds 文件）
+    # 加载网格坐标
     ds_tpl = xr.open_dataset(rsds_files[common_years[0]])
     lat_2d = ds_tpl["lat"].values.astype(np.float32)
     lon_2d = ds_tpl["lon"].values.astype(np.float32)
     ds_tpl.close()
     logger.info(f"网格大小：lat_2d {lat_2d.shape}, lon_2d {lon_2d.shape}")
 
-    attrs = {
-        "gcm_model": gcm_model,
-        "realization": realization,
-        "rcm_model": rcm_model,
-        "scenario": scenario,
-        "years": years,
-        "months": months if months.strip() else "1-12",
-        "data_source": "CMIP6-CORDEX NAM-12",
-        "time_alignment": "scheme4: keep rsds time axis (:30); interpolate tas/uas/vas (:00) to rsds time",
-        "radiation_decomposition": "Erbs diffuse fraction",
-        "tracking": "two-axis tracking",
-        "temperature_correction": f"TEMcoef=1-gamma*(Tcell-25), Tcell={C1}+{C2}*Tair+{C3}*I-{C4}*V",
-        "system_coefficient": SYS_COEF,
-    }
+    # 逐年计算
+    yearly_files: list[Path] = []
+    for yr in common_years:
+        yr_file = (
+            yearly_dir
+            / f"solar_CF_NAM-12_{gcm_model}_{realization}_{rcm_model}_{scenario}_{yr}_{months_tag(months)}.nc"
+        )
+        if yr_file.exists() and not overwrite:
+            logger.info(f"  {yr} 已存在，跳过")
+            yearly_files.append(yr_file)
+            continue
 
-    nc = create_output_file_rotated(
-        out_file=out_file,
-        template_file=rsds_files[common_years[0]],
-        total_time_steps=total_steps,
-        compress_level=compress_level,
-        chunk_time=chunk_time,
-        attrs=attrs,
-    )
-    cf_var = nc.variables["solar_cf"]
-    tvar = nc.variables["time"]
+        logger.info(f"处理 {yr}...")
+        try:
+            _compute_solar_cf_year(
+                yr=yr,
+                rsds_file=rsds_files[yr],
+                tas_file=tas_files[yr],
+                uas_file=uas_files[yr],
+                vas_file=vas_files[yr],
+                yr_out_file=yr_file,
+                lat_2d=lat_2d,
+                lon_2d=lon_2d,
+                months=months,
+                chunk_time=chunk_time,
+                compress_level=compress_level,
+            )
+        except Exception:
+            if yr_file.exists():
+                logger.error(f"{yr} 计算出错，删除：{yr_file}")
+                yr_file.unlink()
+            raise
+        yearly_files.append(yr_file)
 
-    global_out_offset = 0
-    total_sum = 0.0
-    total_count = 0
-    max_cf = 0.0
+    # 合并年度文件
+    logger.info(f"开始合并 {len(yearly_files)} 个年度文件...")
+    _merge_yearly_nc_files(yearly_files, out_file, "solar_cf", compress_level, chunk_time)
+    logger.info(f"已合并保存：{out_file}")
+    logger.info(f"可删除年度文件目录：{yearly_dir}")
 
-    try:
-        for yr in common_years:
-            n_time = year_ntimes[yr]
-            logger.info(f"处理 {yr}（{n_time} 步）...")
-
-            ds_rsds = xr.open_dataset(rsds_files[yr])
-            ds_tas = xr.open_dataset(tas_files[yr])
-            ds_uas = xr.open_dataset(uas_files[yr])
-            ds_vas = xr.open_dataset(vas_files[yr])
-
-            time_name = find_coord_name(ds_rsds, ["time"])
-            rlat_name = find_coord_name(ds_rsds, ["rlat"])
-            rlon_name = find_coord_name(ds_rsds, ["rlon"])
-
-            rsds_da = prepare_dataarray(ds_rsds, "rsds", time_name, rlat_name, rlon_name)
-            tas_da = prepare_dataarray(ds_tas, "tas", time_name, rlat_name, rlon_name)
-            uas_da = prepare_dataarray(ds_uas, "uas", time_name, rlat_name, rlon_name)
-            vas_da = prepare_dataarray(ds_vas, "vas", time_name, rlat_name, rlon_name)
-
-            logger.info(f"  rsds time: {ds_rsds[time_name].values[0]} ~ {ds_rsds[time_name].values[-1]}")
-            logger.info(f"  tas  time: {ds_tas[time_name].values[0]} ~ {ds_tas[time_name].values[-1]}")
-
-            rsds_units = ds_rsds[rsds_da.name].attrs.get("units", "")
-            tas_units = ds_tas[tas_da.name].attrs.get("units", "")
-            uas_units = ds_uas[uas_da.name].attrs.get("units", "")
-            vas_units = ds_vas[vas_da.name].attrs.get("units", "")
-
-            # 写入该年的 time 值（使用 rsds 的 decode_times=False 原始值）
-            raw = xr.open_dataset(rsds_files[yr], decode_times=False)
-            tvar[global_out_offset : global_out_offset + n_time] = raw["time"].values[:n_time]
-            raw.close()
-
-            # 构建时间索引
-            time_idx, doy_all, hour_all = build_time_index(ds_rsds[time_name], str(yr), months)
-            n_selected = len(time_idx)
-            logger.info(f"  匹配时间步：{n_selected}/{n_time}")
-
-            year_out_offset = 0
-            for start in tqdm(range(0, n_selected, chunk_time), desc=f"solar-{yr}", unit="块"):
-                end = min(start + chunk_time, n_selected)
-                idx_chunk = time_idx[start:end]
-
-                target_times = ds_rsds[time_name].isel({time_name: idx_chunk}).values
-
-                rsds_raw = rsds_da.isel({time_name: idx_chunk}).values
-                tas_raw = interp_instantaneous_to_target_times_chunk(
-                    tas_da, time_name, target_times, fill_boundary="nearest"
-                )
-                uas_raw = interp_instantaneous_to_target_times_chunk(
-                    uas_da, time_name, target_times, fill_boundary="nearest"
-                )
-                vas_raw = interp_instantaneous_to_target_times_chunk(
-                    vas_da, time_name, target_times, fill_boundary="nearest"
-                )
-
-                rsds_kw = to_kw_m2(rsds_raw, rsds_units)
-                tas_c = tas_to_celsius(tas_raw, tas_units)
-                uas_ms = wind_to_ms(uas_raw, uas_units)
-                vas_ms = wind_to_ms(vas_raw, vas_units)
-
-                cf_chunk = compute_solar_cf_chunk(
-                    rsds_kw=rsds_kw,
-                    tas_c=tas_c,
-                    uas=uas_ms,
-                    vas=vas_ms,
-                    doy=doy_all[start:end],
-                    hour_decimal_utc=hour_all[start:end],
-                    lats=lat_2d,
-                    lons=lon_2d,
-                )
-
-                out_start = global_out_offset + year_out_offset
-                cf_var[out_start : out_start + (end - start), :, :] = cf_chunk
-                year_out_offset += end - start
-
-                finite = np.isfinite(cf_chunk)
-                if np.any(finite):
-                    vals = cf_chunk[finite]
-                    total_sum += float(vals.sum(dtype=np.float64))
-                    total_count += int(vals.size)
-                    max_cf = max(max_cf, float(vals.max()))
-
-                del rsds_raw, tas_raw, uas_raw, vas_raw, rsds_kw, tas_c, uas_ms, vas_ms, cf_chunk
-                gc.collect()
-
-            global_out_offset += year_out_offset
-            ds_rsds.close()
-            ds_tas.close()
-            ds_uas.close()
-            ds_vas.close()
-            gc.collect()
-
-    except BaseException:
-        if nc.isopen():
-            nc.close()
-        if out_file.exists():
-            logger.error(f"计算出错，删除不完整的输出文件：{out_file}")
-            out_file.unlink()
-        raise
-    else:
-        nc.close()
-
-    logger.info(f"已保存：{out_file}")
-    if total_count:
-        logger.info(f"  整体平均 CF: {total_sum / total_count:.4f}")
-        logger.info(f"  全局最大 CF: {max_cf:.4f}")
     return out_file
 
 
