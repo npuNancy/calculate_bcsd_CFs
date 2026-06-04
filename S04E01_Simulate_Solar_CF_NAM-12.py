@@ -802,6 +802,7 @@ def compute_nam12_solar_cf(
     chunk_time: int = 24,
     overwrite: bool = False,
     compress_level: int = 4,
+    merge: bool = False,
 ) -> Path:
     """计算 CORDEX NAM-12 光伏容量因子（逐年独立计算 + 合并）。"""
     y0, y1 = parse_years(years)
@@ -877,13 +878,15 @@ def compute_nam12_solar_cf(
             raise
         yearly_files.append(yr_file)
 
-    # 合并年度文件
-    logger.info(f"开始合并 {len(yearly_files)} 个年度文件...")
-    _merge_yearly_nc_files(yearly_files, out_file, "solar_cf", compress_level, chunk_time)
-    logger.info(f"已合并保存：{out_file}")
-    logger.info(f"可删除年度文件目录：{yearly_dir}")
-
-    return out_file
+    if merge:
+        # 合并年度文件
+        logger.info(f"开始合并 {len(yearly_files)} 个年度文件...")
+        _merge_yearly_nc_files(yearly_files, out_file, "solar_cf", compress_level, chunk_time)
+        logger.info(f"已合并保存：{out_file}")
+        logger.info(f"可删除年度文件目录：{yearly_dir}")
+    else:
+        logger.info(f"逐年文件已保存到：{yearly_dir}")
+        logger.info(f"未执行合并，单年文件保留。")
 
 
 def main() -> None:
@@ -901,6 +904,7 @@ def main() -> None:
     parser.add_argument("--chunk_time", type=int, default=24, help="每块时间步数")
     parser.add_argument("--compress_level", type=int, default=4, help="NetCDF 压缩级别 0-9")
     parser.add_argument("--overwrite", action="store_true", help="覆盖已有输出")
+    parser.add_argument("--merge", action="store_true", help="执行合并, 默认不合并, 逐年输出")
     args = parser.parse_args()
 
     compute_nam12_solar_cf(
@@ -915,6 +919,7 @@ def main() -> None:
         chunk_time=args.chunk_time,
         overwrite=args.overwrite,
         compress_level=args.compress_level,
+        merge=args.merge,
     )
 
 

@@ -201,9 +201,7 @@ def cordex_var_files(
             if y0 <= year <= y1:
                 result[year] = Path(f)
     if not result:
-        raise FileNotFoundError(
-            f"在 {var_dir} 中找不到 {y0}-{y1} 范围内的 {var} 文件"
-        )
+        raise FileNotFoundError(f"在 {var_dir} 中找不到 {y0}-{y1} 范围内的 {var} 文件")
     return result
 
 
@@ -419,7 +417,6 @@ def create_output_file_rotated(
     return nc
 
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # 4. 合并年度文件与单年计算
 # ─────────────────────────────────────────────────────────────────────────────
@@ -546,7 +543,7 @@ def _compute_wind_cf_year(
 
             cf_chunk = compute_wind_cf_chunk(uas_ms, vas_ms, ws_curve, pw_curve, rated_kw, extrap_ratio)
 
-            cf_var[start : end, :, :] = cf_chunk
+            cf_var[start:end, :, :] = cf_chunk
 
             del uas_raw, vas_raw, uas_ms, vas_ms, cf_chunk
             gc.collect()
@@ -584,6 +581,7 @@ def compute_nam12_wind_cf(
     chunk_time: int = 24,
     overwrite: bool = False,
     compress_level: int = 4,
+    merge: bool = False,
 ) -> Path:
     """计算 CORDEX NAM-12 陆上风电容量因子（逐年独立计算 + 合并）。"""
     y0, y1 = parse_years(years)
@@ -604,7 +602,9 @@ def compute_nam12_wind_cf(
     logger.info(f"待处理年份：{common_years[0]}-{common_years[-1]}，共 {len(common_years)} 年")
 
     out_file = (
-        Path(output_dir) / gcm_model / realization
+        Path(output_dir)
+        / gcm_model
+        / realization
         / f"wind_CF_NAM-12_{gcm_model}_{realization}_{rcm_model}_{scenario}_{years}_{months_tag(months)}.nc"
     )
     if out_file.exists() and not overwrite:
@@ -624,8 +624,7 @@ def compute_nam12_wind_cf(
     yearly_files: list[Path] = []
     for yr in common_years:
         yr_file = (
-            yearly_dir
-            / f"wind_CF_NAM-12_{gcm_model}_{realization}_{rcm_model}_{scenario}_{yr}_{months_tag(months)}.nc"
+            yearly_dir / f"wind_CF_NAM-12_{gcm_model}_{realization}_{rcm_model}_{scenario}_{yr}_{months_tag(months)}.nc"
         )
         if yr_file.exists() and not overwrite:
             logger.info(f"  {yr} 已存在，跳过")
@@ -653,13 +652,16 @@ def compute_nam12_wind_cf(
             raise
         yearly_files.append(yr_file)
 
-    # 合并年度文件
-    logger.info(f"开始合并 {len(yearly_files)} 个年度文件...")
-    _merge_yearly_nc_files(yearly_files, out_file, "wind_cf", compress_level, chunk_time)
-    logger.info(f"已合并保存：{out_file}")
-    logger.info(f"可删除年度文件目录：{yearly_dir}")
+    if merge:
+        # 合并年度文件
+        logger.info(f"开始合并 {len(yearly_files)} 个年度文件...")
+        _merge_yearly_nc_files(yearly_files, out_file, "wind_cf", compress_level, chunk_time)
+        logger.info(f"已合并保存：{out_file}")
+        logger.info(f"可删除年度文件目录：{yearly_dir}")
 
-    return out_file
+    else:
+        logger.info(f"逐年文件已保存到：{yearly_dir}")
+        logger.info(f"未执行合并，单年文件保留。")
 
 
 def main() -> None:
@@ -677,6 +679,7 @@ def main() -> None:
     parser.add_argument("--chunk_time", type=int, default=24, help="每块时间步数")
     parser.add_argument("--compress_level", type=int, default=4, help="NetCDF 压缩级别 0-9")
     parser.add_argument("--overwrite", action="store_true", help="覆盖已有输出")
+    parser.add_argument("--merge", action="store_true", help="执行合并, 默认不合并, 逐年输出")
     args = parser.parse_args()
 
     compute_nam12_wind_cf(
@@ -691,6 +694,7 @@ def main() -> None:
         chunk_time=args.chunk_time,
         overwrite=args.overwrite,
         compress_level=args.compress_level,
+        merge=args.merge,
     )
 
 
