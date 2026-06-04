@@ -605,6 +605,7 @@ def compute_nam12_wind_cf(
         Path(output_dir)
         / gcm_model
         / realization
+        / scenario
         / f"wind_CF_NAM-12_{gcm_model}_{realization}_{rcm_model}_{scenario}_{years}_{months_tag(months)}.nc"
     )
     if out_file.exists() and not overwrite:
