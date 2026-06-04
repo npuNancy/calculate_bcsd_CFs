@@ -449,15 +449,23 @@ def _merge_yearly_nc_files(
     cf_var_out = nc_out.variables[cf_var_name]
     tvar_out = nc_out.variables["time"]
 
-    offset = 0
-    for f in yearly_files:
-        with Dataset(str(f), "r") as nc_in:
-            n = nc_in.dimensions["time"].size
-            tvar_out[offset : offset + n] = nc_in.variables["time"][:]
-            cf_var_out[offset : offset + n, :, :] = nc_in.variables[cf_var_name][:, :, :]
-            offset += n
+    try:
+        offset = 0
+        for f in yearly_files:
+            with Dataset(str(f), "r") as nc_in:
+                n = nc_in.dimensions["time"].size
+                tvar_out[offset : offset + n] = nc_in.variables["time"][:]
+                cf_var_out[offset : offset + n, :, :] = nc_in.variables[cf_var_name][:, :, :]
+                offset += n
 
-    nc_out.close()
+        nc_out.close()
+    except BaseException:
+        if nc_out.isopen():
+            nc_out.close()
+        if out_file.exists():
+            logger.error(f"合并出错，删除不完整的文件：{out_file}")
+            out_file.unlink()
+        raise
     return out_file
 
 
