@@ -55,6 +55,7 @@ import numpy as np
 import xarray as xr
 from netCDF4 import Dataset
 from tqdm import tqdm
+from global_land_mask import globe
 
 logging.basicConfig(
     level=logging.INFO,
@@ -80,6 +81,24 @@ def get_var_name(ds: xr.Dataset, preferred: str) -> str:
     if len(ds.data_vars) == 1:
         return list(ds.data_vars)[0]
     raise KeyError(f"无法确定变量 {preferred}，可用变量：{list(ds.data_vars)}")
+
+
+def build_land_mask(lats: np.ndarray, lons: np.ndarray) -> np.ndarray:
+    """根据输出网格 lat/lon 生成陆地掩膜 (n_lat, n_lon)，True=陆地。
+
+    输入数据（output/CFs_of_*_ERA5Land）的海洋格点曾被错误填成 0，
+    本脚本在求多年平均后用 global-land-mask 把海洋格点重新设为 NaN。
+    global_land_mask 要求经度 ∈ [-180, 180]、纬度 ∈ [-90, 90]，
+    因此对 ERA5-Land [0, 360) 经度做归一化，并夹紧纬度避免浮点越界。
+    """
+    lats = np.asarray(lats, dtype=np.float64)
+    lons = np.asarray(lons, dtype=np.float64)
+
+    lons_conv = ((lons + 180.0) % 360.0) - 180.0  # [0,360) -> [-180,180)
+    lats_clip = np.clip(lats, -90.0, 90.0)
+
+    lon2d, lat2d = np.meshgrid(lons_conv, lats_clip)  # (n_lat, n_lon)
+    return globe.is_land(lat2d, lon2d).astype(bool)
 
 
 def cf_file_path(cf_dir: str | Path, cf_type: str, year: int, month: int) -> Path:
@@ -156,6 +175,11 @@ def compute_monthly_mean(
     lats = ref_ds[lat_name].values.astype(np.float32)
     lons = ref_ds[lon_name].values.astype(np.float32)
     n_lat, n_lon = len(lats), len(lons)
+
+    # 输入数据海洋格点曾被填成 0，这里构建陆地掩膜，写盘前把海洋置为 NaN。
+    land_mask = build_land_mask(lats, lons)  # (n_lat, n_lon) bool
+    ocean = ~land_mask
+    logger.info(f"陆地格点占比：{100.0 * land_mask.mean():.1f}%")
 
     ref_time = ref_ds[time_name].values[:target_hours]
     time_attrs = dict(ref_ds[time_name].attrs)
@@ -262,6 +286,8 @@ def compute_monthly_mean(
                     continue
 
             mean_arr = np.where(count_arr > 0, sum_arr / count_arr, np.nan).astype(np.float32)
+            # 海洋格点置为 NaN（修复输入数据把海洋填 0 的问题）
+            mean_arr[:, ocean] = np.nan
             cf_var[t_start:t_end, :, :] = mean_arr
 
             del sum_arr, count_arr, mean_arr
