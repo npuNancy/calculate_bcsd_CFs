@@ -61,6 +61,7 @@ import numpy as np
 import xarray as xr
 from netCDF4 import Dataset
 from tqdm import tqdm
+from global_land_mask import globe
 
 # ── 日志配置 ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -126,6 +127,22 @@ def find_coord_name(ds: xr.Dataset, candidates: Iterable[str]) -> str:
         if c in ds.coords or c in ds.dims:
             return c
     raise KeyError(f"找不到坐标名，候选：{list(candidates)}；数据维度：{list(ds.dims)}")
+
+
+def build_land_mask(lat_2d: np.ndarray, lon_2d: np.ndarray) -> np.ndarray:
+    """根据 NAM-12 曲线网格的二维 lat/lon 生成陆地掩膜，True=陆地。
+
+    NAM-12 为旋转极点曲线网格，lat/lon 均为二维数组。
+    global_land_mask 要求经度 ∈ [-180, 180]、纬度 ∈ [-90, 90]，
+    因此对经度做归一化，并夹紧纬度避免浮点越界。
+    """
+    lat_2d = np.asarray(lat_2d, dtype=np.float64)
+    lon_2d = np.asarray(lon_2d, dtype=np.float64)
+
+    lon_conv = ((lon_2d + 180.0) % 360.0) - 180.0  # [0,360) -> [-180,180)
+    lat_clip = np.clip(lat_2d, -90.0, 90.0)
+
+    return globe.is_land(lat_clip, lon_conv).astype(bool)
 
 
 def get_var_name(ds: xr.Dataset, preferred: str) -> str:
@@ -710,6 +727,9 @@ def _compute_solar_cf_year(
     n_selected = len(time_idx)
     logger.info(f"  匹配时间步：{n_selected}/{n_time}")
 
+    land_mask = build_land_mask(lat_2d, lon_2d)  # (n_rlat, n_rlon) bool
+    logger.info(f"  陆地格点占比：{100.0 * land_mask.mean():.1f}%")
+
     nc = create_output_file_rotated(
         out_file=yr_out_file,
         template_file=rsds_file,
@@ -758,6 +778,9 @@ def _compute_solar_cf_year(
                 lats=lat_2d,
                 lons=lon_2d,
             )
+
+            # 海洋格点恢复为 NaN（修复 nan_to_num 把海洋填 0 的问题）
+            cf_chunk = np.where(land_mask[None, :, :], cf_chunk, np.nan).astype(np.float32)
 
             cf_var[out_offset : out_offset + (end - start), :, :] = cf_chunk
             out_offset += end - start

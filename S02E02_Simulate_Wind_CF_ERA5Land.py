@@ -49,6 +49,7 @@ import xarray as xr
 from netCDF4 import Dataset
 from tqdm import tqdm
 from windpowerlib import WindTurbine
+from global_land_mask import globe
 
 # ── 日志配置 ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -176,6 +177,22 @@ def validate_same_grid(
         raise ValueError(f"{name} 与 u10 的纬度网格不一致。")
     if not np.allclose(ref[lon_name].values, other[lon_name].values, rtol=0.0, atol=1e-6, equal_nan=True):
         raise ValueError(f"{name} 与 u10 的经度网格不一致。")
+
+
+def build_land_mask(lats: np.ndarray, lons: np.ndarray) -> np.ndarray:
+    """根据输出网格 lat/lon 生成陆地掩膜 (n_lat, n_lon)，True=陆地。
+
+    global_land_mask 要求经度 ∈ [-180, 180]、纬度 ∈ [-90, 90]，
+    因此对 ERA5-Land [0, 360) 经度做归一化，并夹紧纬度避免浮点越界。
+    """
+    lats = np.asarray(lats, dtype=np.float64)
+    lons = np.asarray(lons, dtype=np.float64)
+
+    lons_conv = ((lons + 180.0) % 360.0) - 180.0  # [0,360) -> [-180,180)
+    lats_clip = np.clip(lats, -90.0, 90.0)
+
+    lon2d, lat2d = np.meshgrid(lons_conv, lats_clip)  # (n_lat, n_lon)
+    return globe.is_land(lat2d, lon2d).astype(bool)
 
 
 def wind_to_ms(arr: np.ndarray, units: str | None) -> np.ndarray:
@@ -409,6 +426,9 @@ def compute_month_wind_cf(
     logger.info(f"风机：{TURBINE_TYPE}；rated={rated_kw:.1f} kW；cut-out={CUT_OUT:.1f} m/s")
     logger.info("输出坐标统一为：time/lat/lon；变量名：wind_cf")
 
+    land_mask = build_land_mask(lats, lons)  # (n_lat, n_lon) bool
+    logger.info(f"陆地格点占比：{100.0 * land_mask.mean():.1f}%")
+
     attrs = {
         "source": "ERA5-Land",
         "year": year,
@@ -423,6 +443,7 @@ def compute_month_wind_cf(
         "cut_out_speed_ms": CUT_OUT,
         "farm_efficiency_multiplier": "not applied",
         "notes": "This script uses ERA5-Land u10/v10 and computes onshore wind CF only.",
+        "ocean_handling": "ocean grid cells set to NaN via global-land-mask",
     }
 
     nc = create_output_file(
@@ -469,6 +490,10 @@ def compute_month_wind_cf(
                 rated_kw=rated_kw,
                 extrap_ratio=extrap_ratio,
             )
+
+            # 海洋格点恢复为 NaN（修复 nan_to_num 把海洋填 0 的问题）
+            cf_chunk = np.where(land_mask[None, :, :], cf_chunk, np.nan).astype(np.float32)
+
             cf_var[start:end, :, :] = cf_chunk
 
             finite = np.isfinite(cf_chunk)

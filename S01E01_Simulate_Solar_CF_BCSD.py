@@ -66,6 +66,7 @@ import numpy as np
 import xarray as xr
 from netCDF4 import Dataset
 from tqdm import tqdm
+from global_land_mask import globe
 
 # ── 日志配置 ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -173,6 +174,22 @@ def find_coord_name(ds: xr.Dataset, candidates: Iterable[str]) -> str:
         if c in ds.coords or c in ds.dims:
             return c
     raise KeyError(f"找不到坐标名，候选：{list(candidates)}；数据维度：{list(ds.dims)}")
+
+
+def build_land_mask(lats: np.ndarray, lons: np.ndarray) -> np.ndarray:
+    """根据输出网格 lat/lon 生成陆地掩膜 (n_lat, n_lon)，True=陆地。
+
+    global_land_mask 要求经度 ∈ [-180, 180]、纬度 ∈ [-90, 90]，
+    因此对 [0, 360) 经度做归一化，并夹紧纬度避免浮点越界。
+    """
+    lats = np.asarray(lats, dtype=np.float64)
+    lons = np.asarray(lons, dtype=np.float64)
+
+    lons_conv = ((lons + 180.0) % 360.0) - 180.0  # [0,360) -> [-180,180)
+    lats_clip = np.clip(lats, -90.0, 90.0)
+
+    lon2d, lat2d = np.meshgrid(lons_conv, lats_clip)  # (n_lat, n_lon)
+    return globe.is_land(lat2d, lon2d).astype(bool)
 
 
 def to_kw_m2(arr: np.ndarray, units: str | None) -> np.ndarray:
@@ -669,12 +686,16 @@ def compute_region_solar_cf(
     nlon = len(lons)
     logger.info(f"匹配时间步: {n_time}；空间维度: lat={nlat}, lon={nlon}")
 
+    land_mask = build_land_mask(lats, lons)  # (n_lat, n_lon) bool
+    logger.info(f"陆地格点占比：{100.0 * land_mask.mean():.1f}%")
+
     attrs = {
         "model": model,
         "region": region,
         "scenario": scenario,
         "years": years,
         "months": months if months.strip() else "1-12",
+        "ocean_handling": "ocean grid cells set to NaN via global-land-mask",
         "source_files": ", ".join(str(p) for p in [rsds_file, tas_file, uas_file, vas_file]),
         "time_alignment": "scheme4: keep rsds time axis; linearly interpolate instantaneous tas/uas/vas to rsds time; boundary uses nearest value",
         "radiation_decomposition": "Erbs diffuse fraction from rsds/GHI; same data requirement as original code",
@@ -736,6 +757,9 @@ def compute_region_solar_cf(
                 lats=lats,
                 lons=lons,
             )
+
+            # 海洋格点恢复为 NaN（修复 nan_to_num 把海洋填 0 的问题）
+            cf_chunk = np.where(land_mask[None, :, :], cf_chunk, np.nan).astype(np.float32)
 
             cf_var[out_start : out_start + (end - start), :, :] = cf_chunk
             out_start += end - start

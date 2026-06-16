@@ -14,3 +14,4 @@ ipykernel
 h5netcdf
 dask
 pvlib
+global-land-mask
