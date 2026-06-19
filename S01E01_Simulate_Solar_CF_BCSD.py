@@ -453,13 +453,17 @@ def validate_same_spatial_grid(
 
 
 def _datetime64_to_ns(values: np.ndarray) -> np.ndarray:
-    """将 datetime64 坐标转换为 ns 整数，便于 searchsorted。"""
+    """将时间坐标转换为数值，便于 searchsorted。支持 datetime64 和 cftime。"""
+    import cftime
+
     arr = np.asarray(values)
-    if not np.issubdtype(arr.dtype, np.datetime64):
-        # 当前 BCSD 文件通常 decode 为 datetime64。若不是，则直接转 float。
-        # 这种情况要求四个变量的 time 单位一致。
-        return arr.astype(np.float64)
-    return arr.astype("datetime64[ns]").astype(np.int64)
+    if np.issubdtype(arr.dtype, np.datetime64):
+        return arr.astype("datetime64[ns]").astype(np.int64)
+    if arr.dtype == object and arr.size > 0 and isinstance(arr.flat[0], cftime.datetime):
+        # cftime 类型（如 CANESM5 的 noleap 日历）：转为距第一个时间点的秒偏移量。
+        base = arr.flat[0]
+        return np.array([(v - base).total_seconds() for v in arr.flat], dtype=np.float64)
+    return arr.astype(np.float64)
 
 
 def interp_instantaneous_to_target_times_chunk(
@@ -766,8 +770,16 @@ def compute_region_solar_cf(
 
             del rsds_raw, tas_raw, uas_raw, vas_raw, rsds_kw, tas_c, cf_chunk
             gc.collect()
+    except BaseException:
+        if nc.isopen():
+            nc.close()
+        if out_file.exists():
+            logger.error(f"计算出错，删除不完整的文件：{out_file}")
+            out_file.unlink()
+        raise
     finally:
-        nc.close()
+        if nc.isopen():
+            nc.close()
         ds_rsds.close()
         ds_tas.close()
         ds_uas.close()

@@ -462,8 +462,16 @@ def compute_china_wind_cf(
 
             del sfcWind_raw, sfcWind_ms, cf_chunk
             gc.collect()
+    except BaseException:
+        if nc.isopen():
+            nc.close()
+        if out_file.exists():
+            logger.error(f"计算出错，删除不完整的文件：{out_file}")
+            out_file.unlink()
+        raise
     finally:
-        nc.close()
+        if nc.isopen():
+            nc.close()
         ds_wind.close()
 
     logger.info(f"✓ 已保存：{out_file}")

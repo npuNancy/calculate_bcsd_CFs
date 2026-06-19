@@ -693,8 +693,16 @@ def compute_china_solar_cf(
 
             del rsds_raw, tas_raw, wind_raw, rsds_kw, tas_c, sfcWind, cf_chunk
             gc.collect()
+    except BaseException:
+        if nc.isopen():
+            nc.close()
+        if out_file.exists():
+            logger.error(f"计算出错，删除不完整的文件：{out_file}")
+            out_file.unlink()
+        raise
     finally:
-        nc.close()
+        if nc.isopen():
+            nc.close()
         ds_rsds.close()
         ds_tas.close()
         ds_wind.close()
