@@ -4,8 +4,8 @@ output/
 outputs/
 
 test.ipynb
-run_all_solar.sh
-run_all_wind.sh
+run_all_*solar.sh
+run_all_*wind.sh
 run_all_solar*.sh
 run_all_wind*.sh
 
