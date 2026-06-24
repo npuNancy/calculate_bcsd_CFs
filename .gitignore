@@ -1,6 +1,7 @@
 # Custom
-data/
-!data/NAM-12_grid.nc
+data/*
+!data/grid_of_regions
+!data/grid_of_regions/**
 
 output/
 outputs/
