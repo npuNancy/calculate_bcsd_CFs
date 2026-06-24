@@ -1,5 +1,7 @@
 # Custom
 data/
+!data/NAM-12_grid.nc
+
 output/
 outputs/
 
