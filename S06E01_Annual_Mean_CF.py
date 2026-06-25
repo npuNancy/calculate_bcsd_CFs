@@ -36,10 +36,10 @@ output/annual_mean_cf/{model}/
 运行示例
 --------
 # 默认：NESM3，三种情景，风+光
-python S06_Annual_Mean_CF.py
+python S06E01_Annual_Mean_CF.py
 
 # 只算 ssp245 的光伏
-python S06_Annual_Mean_CF.py --model NESM3 --scenarios ssp245 --energy solar
+python S06E01_Annual_Mean_CF.py --model NESM3 --scenarios ssp245 --energy solar
 """
 
 from __future__ import annotations
