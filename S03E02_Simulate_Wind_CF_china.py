@@ -52,6 +52,7 @@ import argparse
 import gc
 import glob
 import logging
+import re
 from pathlib import Path
 from typing import Iterable
 
@@ -109,8 +110,68 @@ def months_tag(months: str) -> str:
     return "m" + "-".join(f"{m:02d}" for m in ms)
 
 
-def find_china_bcsd_file(data_dir: str | Path, model: str, scenario: str, var: str) -> Path:
-    """查找中国区域的 BCSD 降尺度文件。"""
+def _parse_year_range_from_filename(name: str) -> tuple[int | None, int | None]:
+    """从文件名解析年份范围，如 ..._ssp126_2015-2060.nc -> (2015, 2060)，
+    单年 ..._ssp126_2015.nc -> (2015, 2015)。无法解析返回 (None, None)。"""
+    m = re.search(r"_(\d{4})-(\d{4})\.nc$", name)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    m = re.search(r"_(\d{4})\.nc$", name)
+    if m:
+        y = int(m.group(1))
+        return y, y
+    return None, None
+
+
+def _select_best_bcsd_file(files: list[str], years: str | None) -> Path:
+    """从多个匹配文件中选出最合适的一个。
+
+    选择策略：
+      1. 优先选择文件名年份范围“完全覆盖”请求 years、且范围最紧的文件；
+      2. 否则选择文件名年份范围最大（覆盖最广）的文件；
+      3. 若文件名都不含可解析的年份范围，回退到排序后的第一个文件。
+
+    这样可避免把只覆盖部分年份（如 2015-2016）的旧/测试文件误选为主文件。
+    """
+    parsed = [(f, *_parse_year_range_from_filename(Path(f).name)) for f in files]
+
+    req: tuple[int, int] | None = None
+    if years:
+        try:
+            req = parse_years(years)
+        except ValueError:
+            req = None
+
+    if req is not None:
+        y0, y1 = req
+        covering = [(f, a, b) for f, a, b in parsed if a is not None and a <= y0 and b >= y1]
+        if covering:
+            # 范围最紧（区间最短）优先，并列时取起始年较小的。
+            covering.sort(key=lambda t: (t[2] - t[1], t[1]))
+            return Path(covering[0][0])
+
+    # 兜底：选文件名中年份范围最大的文件。
+    ranged = [(f, a, b) for f, a, b in parsed if a is not None]
+    if ranged:
+        ranged.sort(key=lambda t: (-(t[2] - t[1]), t[1]))
+        return Path(ranged[0][0])
+
+    return Path(files[0])
+
+
+def find_china_bcsd_file(
+    data_dir: str | Path,
+    model: str,
+    scenario: str,
+    var: str,
+    years: str | None = None,
+) -> Path:
+    """查找中国区域的 BCSD 降尺度文件。
+
+    当匹配到多个文件时，按 years 参数选择“覆盖请求年份范围且范围最紧”的文件；
+    若无法按年份筛选，则选择年份范围最大的文件，避免误选只覆盖部分年份的文件
+    （例如残留的 2015-2016 测试文件导致结果仅覆盖 2015-2016）。
+    """
     base = Path(data_dir) / model
     patterns = [
         str(base / f"{var}_3h_bcsd_on_0.1deg_china_{scenario}_*.nc"),
@@ -125,7 +186,12 @@ def find_china_bcsd_file(data_dir: str | Path, model: str, scenario: str, var: s
     if not files:
         raise FileNotFoundError(f"找不到 {var} 文件。已尝试：\n  " + "\n  ".join(patterns))
     if len(files) > 1:
-        logger.warning(f"{var} 匹配到多个文件，将使用第一个：{files[0]}")
+        chosen = _select_best_bcsd_file(files, years)
+        logger.warning(
+            f"{var} 匹配到 {len(files)} 个文件，按年份范围({years or '未指定'})选择：{chosen}\n"
+            + "  全部匹配文件：\n    " + "\n    ".join(files)
+        )
+        return chosen
     return Path(files[0])
 
 
@@ -344,7 +410,7 @@ def compute_china_wind_cf(
     compress_level: int = 4,
 ) -> Path:
     """计算中国区域陆上风电容量因子。"""
-    sfcWind_file = find_china_bcsd_file(data_dir, model, scenario, "sfcWind")
+    sfcWind_file = find_china_bcsd_file(data_dir, model, scenario, "sfcWind", years)
 
     logger.info(f"sfcWind: {sfcWind_file}")
 
