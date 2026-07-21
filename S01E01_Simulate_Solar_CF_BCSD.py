@@ -766,7 +766,10 @@ def compute_region_solar_cf(
         "scenario": scenario,
         "years": years,
         "months": months if months.strip() else "1-12",
-        "ocean_handling": "ocean grid cells set to NaN via global-land-mask",
+        "missing_data_handling": (
+            "ocean grid cells set to NaN via global-land-mask; "
+            "BCSD source-missing grid-time cells set to NaN before writing solar_cf"
+        ),
         "source_files": ", ".join(str(p) for p in [rsds_file, tas_file, uas_file, vas_file]),
         "time_alignment": "scheme4: keep rsds time axis; linearly interpolate instantaneous tas/uas/vas to rsds time; boundary uses nearest value",
         "radiation_decomposition": "Erbs diffuse fraction from rsds/GHI; same data requirement as original code",
@@ -814,6 +817,12 @@ def compute_region_solar_cf(
             vas_raw = interp_instantaneous_to_target_times_chunk(
                 ds_vas[vas_var], time_name, target_times, fill_boundary="nearest"
             )
+            source_valid = (
+                np.isfinite(rsds_raw)
+                & np.isfinite(tas_raw)
+                & np.isfinite(uas_raw)
+                & np.isfinite(vas_raw)
+            )
 
             rsds_kw = to_kw_m2(rsds_raw, rsds_units)
             tas_c = tas_to_celsius(tas_raw, tas_units)
@@ -829,13 +838,13 @@ def compute_region_solar_cf(
                 lons=lons,
             )
 
-            # 海洋格点恢复为 NaN（修复 nan_to_num 把海洋填 0 的问题）
-            cf_chunk = np.where(land_mask[None, :, :], cf_chunk, np.nan).astype(np.float32)
+            valid_mask = source_valid & land_mask[None, :, :]
+            cf_chunk = np.where(valid_mask, cf_chunk, np.nan).astype(np.float32)
 
             cf_var[out_start : out_start + (end - start), :, :] = cf_chunk
             out_start += end - start
 
-            del rsds_raw, tas_raw, uas_raw, vas_raw, rsds_kw, tas_c, cf_chunk
+            del rsds_raw, tas_raw, uas_raw, vas_raw, source_valid, valid_mask, rsds_kw, tas_c, cf_chunk
             gc.collect()
     except BaseException:
         if nc.isopen():

@@ -579,7 +579,10 @@ def compute_region_wind_cf(
         "cut_out_speed_ms": CUT_OUT,
         "farm_efficiency_multiplier": "not applied",
         "notes": "ERA5-Land/BCSD land data are used; offshore wind is not calculated in this script.",
-        "ocean_handling": "ocean grid cells set to NaN via global-land-mask",
+        "missing_data_handling": (
+            "ocean grid cells set to NaN via global-land-mask; "
+            "BCSD source-missing grid-time cells set to NaN before writing wind_cf"
+        ),
     }
 
     nc = create_output_file(
@@ -615,6 +618,7 @@ def compute_region_wind_cf(
 
             uas_raw = ds_uas[uas_var].isel({time_name: idx_chunk}).values
             vas_raw = ds_vas[vas_var].isel({time_name: idx_chunk}).values
+            source_valid = np.isfinite(uas_raw) & np.isfinite(vas_raw)
 
             uas_ms = wind_to_ms(uas_raw, uas_units)
             vas_ms = wind_to_ms(vas_raw, vas_units)
@@ -628,8 +632,8 @@ def compute_region_wind_cf(
                 extrap_ratio=extrap_ratio,
             )
 
-            # 海洋格点恢复为 NaN（修复 nan_to_num 把海洋填 0 的问题）
-            cf_chunk = np.where(land_mask[None, :, :], cf_chunk, np.nan).astype(np.float32)
+            valid_mask = source_valid & land_mask[None, :, :]
+            cf_chunk = np.where(valid_mask, cf_chunk, np.nan).astype(np.float32)
 
             cf_var[out_start : out_start + (end - start), :, :] = cf_chunk
             out_start += end - start
@@ -646,7 +650,7 @@ def compute_region_wind_cf(
                     positive_sum += float(pos.sum(dtype=np.float64))
                     positive_count += int(pos.size)
 
-            del uas_raw, vas_raw, uas_ms, vas_ms, cf_chunk
+            del uas_raw, vas_raw, source_valid, valid_mask, uas_ms, vas_ms, cf_chunk
             gc.collect()
     except BaseException:
         if nc.isopen():
