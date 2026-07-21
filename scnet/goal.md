@@ -28,13 +28,14 @@
 2. 账号在 `squeue` 中的全部作业总数不得超过 20；`PENDING`、`RUNNING` 和过渡状态均计入，不能只统计本项目作业。
 3. 超算约按每核 `3.5 GB` 分配内存。S01E* 当前是单进程程序，多申请的核主要用于取得足够内存，不会自然获得等比例计算加速。
 4. 不删除或覆盖现有 `~/bcsd/data`、`~/bcsd/outputs`、`~/bcsd/runs` 和 `~/bcsd/cache`。
-5. 输入 BCSD 输出必须先校验；不能只因文件存在或上游 Slurm 状态为 `COMPLETED` 就开始计算。
+5. 作业生成和提交准备阶段直接认为 `~/data/bcsd_outputs` 下的 BCSD 输入可用，不执行 NetCDF 内容校验。
 6. 远程项目代码应由本地修改、测试、提交并推送后，再在远程干净工作区执行 fast-forward pull；服务器专用配置和生成结果放在仓库外的 `~/jobs`、`~/logs` 或明确的运行记录目录。
 7. 提交流程与 BCSD 共用 `$HOME/.bcsd_submit.lock`，避免两个提交流程并发突破 20 个作业的硬上限。
 
 另外必须遵守：
 
-- 不在登录节点运行完整年份范围的 S01E* 计算，只通过 Slurm 运行；
+- 不在登录节点执行计算任务；S01E*、NetCDF 批量读取/校验及其他高内存或高 I/O 操作只能通过 Slurm 运行；
+- 登录节点只允许 Git clone/pull、轻量 Python import、作业生成、`bash -n`、文本检查和 Slurm 队列查询；
 - 不把 `region=all` 用作生产并行入口，生产范围必须显式列出；
 - 不因已有输出文件存在就直接认定完成；
 - 不默认使用 `--overwrite`，重算必须精确到单个组合并先记录原因；
@@ -172,7 +173,7 @@ completion_status/
 NOT_READY READY SUBMITTED RUNNING VALID MISSING BROKEN FAILED CANCELLED OOM CHECK_FAILED
 ```
 
-单个能源作业只有在对应输出通过校验时才算完成。Slurm 作业为 `COMPLETED` 不能直接转换为 `VALID`。一个 `region × scenario` 的完整风光任务只有在 solar 行和 wind 行均为 `VALID` 时才算完成。
+单个能源作业以 Slurm 成功、`[CF_DONE]` 日志标记和预期输出文件存在作为完成证据，不读取 NetCDF 内容。一个 `region × scenario` 的完整风光任务只有在 solar 行和 wind 行均为 `VALID` 时才算完成。
 
 ### 4.2 资源使用 CSV
 
@@ -208,12 +209,12 @@ scnet/create_cf_S01_jobs.py
 它不负责：
 
 - 调用 `sbatch`；
-- 判断输入 NetCDF 是否完整；
-- 判断已有输出是否有效；
+- 读取或校验输入 NetCDF 内容；
+- 读取或校验已有输出 NetCDF 内容；
 - 自动删除、覆盖或重提作业；
 - 自动维护本地完成状态 CSV。
 
-因此，生成成功不等于可以提交；提交前仍须完成第 7 节检查。
+生成成功后仍须完成第 7 节的脚本静态检查和精确去重，但不做 NetCDF 校验。
 
 ### 5.2 主要参数
 
@@ -311,28 +312,16 @@ python -c \
 
 ## 7. 生成与提交前检查
 
-### 7.1 输入完整性
+### 7.1 输入使用约定
 
-按能源检查每个 `energy × region × scenario` 的输入：
+生成器参数中列出的所有 `energy × region × scenario` 组合直接视为输入可用。提交准备阶段：
 
-```text
-solar：检查 rsds、tas、uas、vas
-wind：检查 uas、vas
-```
+- 不使用 xarray、netCDF4、CDO 等工具打开输入文件；
+- 不批量读取时间轴、变量、维度或首尾时间片；
+- 不在登录节点扫描 NetCDF 内容；
+- 不因预检查结果把指定组合排除在脚本生成范围之外。
 
-对该能源所需的每个变量检查：
-
-1. 文件存在且大小大于 0；
-2. NetCDF 可以打开；
-3. 目标变量存在，兼容 `<var>` 和 `<var>_bcsd`；
-4. 包含 `time/lat/lon` 维度；
-5. 时间范围覆盖请求年份；
-6. 时间轴严格递增且没有重复；
-7. 首尾时间片均存在有效值；
-8. 同一能源作业所需变量的空间网格一致；
-9. solar 作业中 `tas/uas/vas` 的时间范围足以插值到 `rsds` 主时间轴。
-
-不满足条件的组合在本地完成状态 CSV 中记为 `NOT_READY` 或 `BROKEN`，不得提交。
+实际输入问题由 Slurm 作业运行 S01E* 时暴露，并根据作业退出状态和日志记录为 `FAILED`。如需专门诊断 NetCDF，必须另行提交诊断 Slurm 作业，不能在登录节点执行。
 
 ### 7.2 生成和静态检查
 
@@ -368,13 +357,13 @@ grep -nE '^#SBATCH|source .*/activate climate|S01E01|S01E02|--data_dir|--model|-
 
 提交某个组合前依次检查：
 
-1. 当前能源对应的输出是否已经存在且通过第 10 节校验；
+1. 当前能源是否已有 Slurm 成功记录、`[CF_DONE]` 标记或预期输出文件；
 2. 当前 `squeue` 是否已有相同精确作业名；
 3. `sacct` 是否已有相同作业的成功或失败历史；
 4. 历史日志是否已有 `[CF_DONE]`；
 5. 本地完成状态 CSV 是否已经记录同一能源组合的有效输出或正在运行的 Job ID。
 
-只有未完成、未在队列且符合重试条件的组合才可提交。S01E* 的“文件存在则跳过”不能替代输出完整性检查。
+只有未完成、未在队列且符合重试条件的组合才可提交。去重只读取 Slurm、日志文本、状态 CSV 和文件元数据，不打开 NetCDF。
 
 ## 8. 提交流程与 20 作业上限
 
@@ -456,7 +445,7 @@ done
 
 ## 9. 本地监控流程
 
-监控程序在本地运行，通过已配置的 SSH 主机别名只读查询远程服务器。监控器职责是“采集 + 校验 + 报告”，默认不调用 `sbatch`、不删除文件、不自动覆盖输出。
+监控程序在本地运行，通过已配置的 SSH 主机别名只读查询远程服务器。监控器职责是“采集 + 状态判定 + 报告”，默认不调用 `sbatch`、不删除文件、不自动覆盖输出，也不读取 NetCDF 内容。
 
 建议每个自然整点执行一次。每轮必须：
 
@@ -465,7 +454,7 @@ done
 3. 对运行作业用 `sstat` 采集实时资源，对完成作业记录 `MaxRSS`；
 4. 扫描 `~/logs/cf_S01/` 中匹配 Job ID 的日志；
 5. 解析包含 `energy=<ENERGY>` 的 `[CF_DONE]`；
-6. 校验该作业对应能源的 NetCDF；
+6. 用 `test -s` 或等价文件元数据检查确认预期输出存在且非空，不打开 NetCDF；
 7. 更新 `completion_<SERVER>.csv` 和 `usage_<SERVER>.csv`；
 8. 原子更新 `latest_snapshot.json`；
 9. 更新与本轮快照时间一致的 `progress_summary.md`；
@@ -473,26 +462,18 @@ done
 
 同一能源组合可能有多个重试 Job ID。监控器应保留实际提供有效输出证据的 Job ID，不能因为更新的重试仍在运行，就把旧 Job ID 已经验证的输出降级。
 
-远程 SSH、Slurm 或 NetCDF 检查失败时记录 `CHECK_FAILED` 或具体错误，不得把旧状态无依据覆盖成 `FAILED`。
+远程 SSH、Slurm、日志或文件元数据查询失败时记录 `CHECK_FAILED` 或具体错误，不得把旧状态无依据覆盖成 `FAILED`。
 
-## 10. 输出完整性检查
+## 10. 输出完成判定
 
-只有同时满足以下条件，单个 solar 或 wind 输出才标记为 `VALID`：
+不执行 NetCDF 内容校验。单个 solar 或 wind 作业同时满足以下条件时标记为 `VALID`：
 
-1. 对应 S01 程序成功结束，日志含相应完成标记；
-2. 文件存在且大小大于 0；
-3. NetCDF 可以打开；
-4. 目标变量为 `solar_cf` 或 `wind_cf`；
-5. 变量包含 `time/lat/lon` 维度；
-6. 时间范围覆盖请求年份；
-7. 时间轴严格递增且没有重复；
-8. 输出空间坐标与输入一致；
-9. 首尾时间片均包含有限值；
-10. 抽样的有限容量因子均位于 `[0, 1]`；
-11. 海洋格点为 `NaN`，陆地至少存在有效值；
-12. 日志中不存在 traceback、OOM、permission denied 等错误。
+1. 顶层 Slurm 作业状态为 `COMPLETED` 且 ExitCode 成功；
+2. 日志含对应 `energy/model/region/scenario` 的 `[CF_DONE]`；
+3. 预期输出路径存在且文件大小大于 0；
+4. 日志中不存在 traceback、OOM、permission denied 等错误。
 
-时间步数应与实际日历和对应输入一致，不为所有模式写死同一个 Gregorian 或 `noleap` 步数。
+这里的文件检查只使用 `test -s`、`stat` 或 `find` 等元数据操作，不使用 xarray、netCDF4、CDO 打开文件。若后续确实需要科学内容验收，必须作为独立 Slurm 诊断任务执行，不得在登录节点运行。
 
 单个作业完成条件为：
 
@@ -539,11 +520,11 @@ sacct -j '<JOB_ID>' --units=G \
 
 | 情况 | 处理 |
 |---|---|
-| 输入缺失或损坏 | 标记 `NOT_READY/BROKEN`，等待上游修复，不提交 |
+| 输入缺失或损坏 | 由 Slurm 作业日志识别并标记 `FAILED`，修复上游后只重提对应作业 |
 | Python 依赖错误 | 在当前账号的 Python user-site 补齐依赖，或经授权修复共享 `climate` 环境；完成 import/小测试后重提 |
 | 节点故障或抢占 | 日志无代码错误时可按原参数重提 |
 | solar 成功、wind 失败 | 保留 solar 作业和输出，只重提独立的 wind 作业 |
-| 输出存在但校验失败 | 记录坏文件和原因，获得明确授权后只处理该组合，再用 `--overwrite` |
+| 输出文件不存在或为空 | 根据日志确认原因，获得明确授权后只处理该组合，再决定是否使用 `--overwrite` |
 | 日志长时间不更新 | 先检查进程、I/O 和文件大小是否推进，不能只凭日志安静就取消 |
 
 每次重试前重新精确去重，并在本地 CSV 记录旧 Job ID、失败原因、参数变化、新 Job ID 和重试次数。
