@@ -540,7 +540,7 @@ sacct -j '<JOB_ID>' --units=G \
 | 情况 | 处理 |
 |---|---|
 | 输入缺失或损坏 | 标记 `NOT_READY/BROKEN`，等待上游修复，不提交 |
-| Python 依赖错误 | 修复项目独立环境，完成 import/小测试后重提 |
+| Python 依赖错误 | 在当前账号的 Python user-site 补齐依赖，或经授权修复共享 `climate` 环境；完成 import/小测试后重提 |
 | 节点故障或抢占 | 日志无代码错误时可按原参数重提 |
 | solar 成功、wind 失败 | 保留 solar 作业和输出，只重提独立的 wind 作业 |
 | 输出存在但校验失败 | 记录坏文件和原因，获得明确授权后只处理该组合，再用 `--overwrite` |
