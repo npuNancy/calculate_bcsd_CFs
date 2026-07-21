@@ -6,6 +6,9 @@ data/*
 output/
 outputs/
 
+# SCNet 本地监控、作业状态和资源快照
+scnet/models/*/completion_status/
+
 test.ipynb
 run_all_*solar.sh
 run_all_*wind.sh
