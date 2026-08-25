@@ -269,7 +269,59 @@ git diff --check
 
 确认差异后再提交并推送。不得直接在远程仓库修改 S01E*、生成器或监控器后形成未回传的代码分叉。
 
-### 6.2 远程更新
+### 6.2 Git 认证与 SSH 密钥同步
+
+每次部署前先检查远程仓库实际使用的 Git URL：
+
+```bash
+cd '<REMOTE_PROJECT_DIR>'
+git remote get-url origin
+```
+
+HTTPS remote 按现有 HTTPS 凭据流程使用，不传输 SSH 密钥。SSH remote 则先用 `git ls-remote origin HEAD` 检查目标账号是否已经具备访问权限；不要只依据 `~/.ssh/` 中是否存在某个文件名判断，也不要通过关闭主机密钥检查来绕过连接错误。
+
+若 SSH remote 因目标服务器没有可用密钥而无法访问仓库，本项目明确允许把本地正在用于访问同一 Git 主机和仓库的 SSH 密钥传到目标服务器。必须遵守以下规则：
+
+1. 先在本地用该密钥成功执行等价的 `git ls-remote`，确认它确实有权访问目标仓库；不得猜测密钥、选择“最新”的密钥或新建未经授权的密钥。
+2. 通过公钥指纹确认本地密钥身份。不得在终端输出、日志、状态文件或聊天内容中显示私钥正文。
+3. 只传输到用户明确指定的 SCNet 主机和同一目标账号的 `~/.ssh/`。传输前确认远程 `~/.ssh/` 由该账号拥有，且目标文件名不存在；若已存在同名文件，停止并核对，不得覆盖。
+4. 私钥和对应公钥应使用明确文件名逐个传输，不得递归复制整个本地 `~/.ssh/`，也不得复制无关密钥、`known_hosts`、SSH 配置、代理套接字或其他凭据。
+5. 保持 SSH 主机密钥验证开启。首次连接时应人工核对主机指纹；禁止使用 `StrictHostKeyChecking=no`。
+
+受控传输示例：
+
+```bash
+# <LOCAL_PRIVATE_KEY> 必须是已验证可访问目标 Git 仓库的本地私钥。
+# <KEY_NAME> 是其在远程 ~/.ssh/ 下的明确文件名，例如 id_ed25519_git_repo。
+ssh '<SSH_HOST>' \
+  'umask 077; mkdir -p "$HOME/.ssh"; chmod 700 "$HOME/.ssh"; test ! -e "$HOME/.ssh/<KEY_NAME>"; test ! -e "$HOME/.ssh/<KEY_NAME>.pub"'
+
+scp -p '<LOCAL_PRIVATE_KEY>' \
+  '<SSH_HOST>:.ssh/<KEY_NAME>.incoming'
+scp -p '<LOCAL_PRIVATE_KEY>.pub' \
+  '<SSH_HOST>:.ssh/<KEY_NAME>.pub.incoming'
+
+ssh '<SSH_HOST>' \
+  'set -eu; test ! -e "$HOME/.ssh/<KEY_NAME>"; test ! -e "$HOME/.ssh/<KEY_NAME>.pub"; chmod 600 "$HOME/.ssh/<KEY_NAME>.incoming"; chmod 644 "$HOME/.ssh/<KEY_NAME>.pub.incoming"; mv "$HOME/.ssh/<KEY_NAME>.incoming" "$HOME/.ssh/<KEY_NAME>"; mv "$HOME/.ssh/<KEY_NAME>.pub.incoming" "$HOME/.ssh/<KEY_NAME>.pub"'
+```
+
+如果本地没有对应 `.pub` 文件，可在本地从私钥导出公钥后再传输；私钥本身不得经过标准输出：
+
+```bash
+ssh-keygen -y -f '<LOCAL_PRIVATE_KEY>' > '<LOCAL_PRIVATE_KEY>.pub'
+```
+
+传输完成后，用明确的远程私钥执行仓库级认证测试：
+
+```bash
+cd '<REMOTE_PROJECT_DIR>'
+GIT_SSH_COMMAND='ssh -i "$HOME/.ssh/<KEY_NAME>" -o IdentitiesOnly=yes' \
+  git ls-remote origin HEAD
+```
+
+只有认证测试成功后，才允许 clone、fetch 或 pull。若需长期使用非默认密钥名，应为该仓库设置明确的 `core.sshCommand`，或在不覆盖已有内容的前提下添加仅针对目标 Git 主机的 SSH 配置；不得整体复制本地 SSH 配置。远程密钥可能被平台定期清理，因此每次部署都先检查并测试，缺失时再按上述流程传输，不得把密钥放入仓库、作业脚本、提交记录或日志作为持久化替代。
+
+### 6.3 远程更新
 
 在目标服务器检查：
 
@@ -288,7 +340,7 @@ git rev-parse --short HEAD
 
 如果工作区不干净，停止更新并先确认改动归属；不得使用 `git reset --hard` 或覆盖远程文件。
 
-### 6.3 Python 环境
+### 6.4 Python 环境
 
 Slurm 作业直接复用已经存在的 `climate` 环境。每个生成脚本必须包含：
 
