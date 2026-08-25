@@ -108,8 +108,10 @@ def find_country_file(cf_root: Path, energy: str, model: str, region: str, scena
 
 
 def find_china_file(cf_root: Path, energy: str, model: str, scenario: str) -> Path | None:
+    # 文件名中的模式名大小写可能与目录名不一致（如 CANESM5 目录下文件名为 CanESM5），
+    # 目录已按模式区分，文件名中的模式名用通配匹配。
     base = cf_root / f"CFs_of_{energy}_china" / model
-    return _pick_file(sorted(base.glob(f"{energy}_CF_china_{model}_{scenario}_*_allmonths.nc")))
+    return _pick_file(sorted(base.glob(f"{energy}_CF_china_*_{scenario}_*_allmonths.nc")))
 
 
 def list_regions(cf_root: Path, energy: str, model: str) -> list[str]:
