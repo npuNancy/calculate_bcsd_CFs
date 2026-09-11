@@ -236,3 +236,7 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Patchify runtime outputs, jobs and status (source guides remain tracked).
+outputs_patchify/
+scnet_runtime/
