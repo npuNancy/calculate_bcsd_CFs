@@ -1,4 +1,5 @@
 # Patchify outputs, job scripts and local runtime
+data/*
 outputs_patchify/
 scnet_runtime/
 output/
@@ -11,4 +12,3 @@ __pycache__/
 .venv/
 .vscode/
 .claude/
-
