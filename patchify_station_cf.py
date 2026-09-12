@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compute station-only capacity factors from global_bcsd final patch files.
 
-This entry point intentionally does not call the historical region pipeline and
+This entry point is the sole production entry and
 never writes a grid CF.  It gathers the required meteorological variables to
 stations first, then applies the existing nonlinear CF kernels.
 """
@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -18,6 +17,8 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 import xarray as xr
+
+from cf_physics import compute_solar_cf_chunk, compute_wind_cf_chunk, _get_power_curve_arrays, power_law_ratio
 
 
 VARS = {"wind": ("uas", "vas"), "solar": ("rsds", "tas", "uas", "vas")}
@@ -30,7 +31,7 @@ def _safe(value: str, name: str) -> str:
 
 
 def find_final(root: str | Path, model: str, scenario: str, variable: str, patch: str) -> Path:
-    """Resolve exactly one global final file; region globs are deliberately unsupported."""
+    """Resolve exactly one global_bcsd patch file; broad globs are unsupported."""
     root = Path(root).expanduser().resolve()
     _safe(model, "model"); _safe(scenario, "scenario"); _safe(variable, "variable"); _safe(patch, "patch")
     direct = [
@@ -134,17 +135,7 @@ def _gather(values: np.ndarray, i0: np.ndarray, i1: np.ndarray, weights: np.ndar
     return out
 
 
-def _load_kernel(name: str):
-    path = Path(__file__).with_name("S01E01_Simulate_Solar_CF_BCSD.py" if name == "solar" else "S01E02_Simulate_Wind_CF_BCSD.py")
-    spec = importlib.util.spec_from_file_location(f"_cf_{name}_kernel", path)
-    if spec is None or spec.loader is None:
-        raise ImportError(path)
-    mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
-    return mod
-
-
 def _solar_points(rsds, tas, uas, vas, times, lat, lon):
-    mod = _load_kernel("solar")
     out = np.empty_like(rsds, dtype=np.float32)
     def _doy(t):
         value = getattr(t, "dayofyr", None)
@@ -156,16 +147,13 @@ def _solar_points(rsds, tas, uas, vas, times, lat, lon):
     # The legacy kernel is grid-shaped; one-point calls preserve its formula
     # exactly while keeping the persisted output station-only.
     for k in range(rsds.shape[1]):
-        out[:, k] = mod.compute_solar_cf_chunk(rsds[:, k:k+1, None], tas[:, k:k+1, None], uas[:, k:k+1, None], vas[:, k:k+1, None], doy, hour, np.array([lat[k]]), np.array([lon[k]])).reshape(-1)
+        out[:, k] = compute_solar_cf_chunk(rsds[:, k:k+1, None], tas[:, k:k+1, None], uas[:, k:k+1, None], vas[:, k:k+1, None], doy, hour, np.array([lat[k]]), np.array([lon[k]])).reshape(-1)
     return out
 
 
 def _wind_points(uas, vas):
-    mod = _load_kernel("wind")
-    ws, pw, rated = mod._get_power_curve_arrays()
-    # _get_power_curve_arrays returns (ws, power, rated); existing kernel needs ratio.
-    ratio = mod.power_law_ratio(100.0, 10.0, 1/7)
-    return mod.compute_wind_cf_chunk(uas, vas, ws, pw, rated, ratio).astype(np.float32)
+    ws, pw, rated = _get_power_curve_arrays()
+    return compute_wind_cf_chunk(uas, vas, ws, pw, rated, power_law_ratio()).astype(np.float32)
 
 
 def compute(args: argparse.Namespace) -> Path:

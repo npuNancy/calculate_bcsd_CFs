@@ -7,7 +7,7 @@ from pathlib import Path
 MODELS=("CANESM5","MPI-ESM1-2-HR","MRI-ESM2-0","BCC-CSM2-MR")
 SCENARIOS=("ssp126","ssp245","ssp585")
 TECHS=("wind","solar")
-PATCHES=tuple(f"R{r:02d}C{c:02d}" for r in range(1,6) for c in range(1,13))
+PATCHES=()
 
 def _token(x):
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", x): raise ValueError(f"unsafe token {x!r}")
@@ -15,7 +15,7 @@ def _token(x):
 
 def build_parser():
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--models", nargs="+", default=list(MODELS)); p.add_argument("--scenarios", nargs="+", default=list(SCENARIOS)); p.add_argument("--patches", nargs="+", default=list(PATCHES)); p.add_argument("--techs", nargs="+", choices=TECHS, default=list(TECHS)); p.add_argument("--years", default="2015-2060"); p.add_argument("--bcsd-root", required=True); p.add_argument("--patch-manifest", required=True); p.add_argument("--stations-csv", required=True); p.add_argument("--output-root", required=True); p.add_argument("--project-dir", default=str(Path(__file__).resolve().parents[2])); p.add_argument("--jobs-dir", required=True); p.add_argument("--logs-dir", required=True); p.add_argument("--partition", default="wzhctest"); p.add_argument("--account", default=None); p.add_argument("--cpus-per-task", type=int, default=2); p.add_argument("--time", default=None); p.add_argument("--overwrite", action="store_true"); p.add_argument("--dry-run", action="store_true"); return p
+    p.add_argument("--models", nargs="+", default=list(MODELS)); p.add_argument("--scenarios", nargs="+", default=list(SCENARIOS)); p.add_argument("--patches", nargs="+", required=True, metavar="PATCH"); p.add_argument("--techs", nargs="+", choices=TECHS, default=list(TECHS)); p.add_argument("--years", default="2015-2060"); p.add_argument("--bcsd-root", required=True); p.add_argument("--patch-manifest", required=True); p.add_argument("--stations-csv", required=True); p.add_argument("--output-root", required=True); p.add_argument("--project-dir", default=str(Path(__file__).resolve().parents[2])); p.add_argument("--jobs-dir", required=True); p.add_argument("--logs-dir", required=True); p.add_argument("--partition", default="wzhctest"); p.add_argument("--account", default=None); p.add_argument("--cpus-per-task", type=int, default=2); p.add_argument("--time", default=None); p.add_argument("--overwrite", action="store_true"); p.add_argument("--dry-run", action="store_true"); return p
 
 def render(a, model, scenario, patch, tech):
     jid=f"cfp_{model}_{scenario}_{patch}_{tech}"; q=shlex.quote
