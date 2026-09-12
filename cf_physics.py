@@ -1,7 +1,7 @@
 """纯物理容量因子核（仅供 global_bcsd patchify 场站流程使用）。
 
-该模块不包含文件发现、区域筛选或 Slurm 编排；输入和输出均为 numpy 数组，
-因此每个 patch 作业可以复用同一套经过验证的风光物理计算。
+该模块只包含可复用的物理计算，不负责文件发现或 Slurm 编排；输入和输出均为
+numpy 数组，因此每个 patch 作业可以复用同一套经过验证的风光物理计算。
 """
 from __future__ import annotations
 
