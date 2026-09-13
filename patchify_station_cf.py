@@ -190,6 +190,14 @@ def compute(args: argparse.Namespace) -> Path:
         if selected.size == 0: raise ValueError(f"no time points in --years {args.years}")
         ref = ref.isel({tn: selected}); times = ref[tn].values
         i0, i1, weights, distance = _match(ref[ln].values, ref[on].values, stations, args.spatial_method)
+        # Station gather only needs the grid rows/columns the interpolation
+        # touches. Crop each variable to those axes before materializing
+        # `.values`; patch files reach tens of GB, so the full-grid array
+        # would exhaust node memory while only a thin station slice is used.
+        used_lat = np.unique(i0); used_lon = np.unique(i1)
+        lat_pos = np.full(i0.max() + 1, -1, dtype=np.int64); lat_pos[used_lat] = np.arange(len(used_lat))
+        lon_pos = np.full(i1.max() + 1, -1, dtype=np.int64); lon_pos[used_lon] = np.arange(len(used_lon))
+        i0 = lat_pos[i0]; i1 = lon_pos[i1]
         arrays = {}
         for v, ds in opened.items():
             da = _var(ds, v)
@@ -198,6 +206,7 @@ def compute(args: argparse.Namespace) -> Path:
                 if v == "rsds":
                     raise ValueError(f"{v} must provide the reference time axis")
                 da = da.interp({dt: ref[tn]}, method="linear")
+            da = da.isel({ln: used_lat, on: used_lon})
             arrays[v] = _gather(np.asarray(da.transpose(dt, ln, on).values), i0, i1, weights)
             arrays[v][:, distance > args.max_distance_deg] = np.nan
             units = str(da.attrs.get("units", "")).lower().replace(" ", "")
