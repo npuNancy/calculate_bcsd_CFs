@@ -278,14 +278,20 @@ def compute(args: argparse.Namespace) -> Path:
         lat_pos = np.full(i0.max() + 1, -1, dtype=np.int64); lat_pos[used_lat] = np.arange(len(used_lat))
         lon_pos = np.full(i1.max() + 1, -1, dtype=np.int64); lon_pos[used_lon] = np.arange(len(used_lon))
         i0 = lat_pos[i0]; i1 = lon_pos[i1]
+        # Keep variables lazy here: interpolating off-axis time to the
+        # reference axis is eager and would materialize the full cropped grid
+        # (dense patches = the whole patch). Interpolation moves into the time
+        # block loop below, padded by one source step so block edges keep
+        # their linear neighbours.
         cropped = {}
+        off_axis = {}
         for v, ds in opened.items():
             da = _var(ds, v)
             dt = _coord(ds, ("time", "valid_time"))
             if dt != tn or not np.array_equal(ds[dt].values, times):
                 if v == "rsds":
                     raise ValueError(f"{v} must provide the reference time axis")
-                da = da.interp({dt: ref[tn]}, method="linear")
+                off_axis[v] = dt
             cropped[v] = (da.isel({ln: used_lat, on: used_lon}), dt)
         units = {v: str(da.attrs.get("units", "")).lower().replace(" ", "") for v, (da, _dt) in cropped.items()}
         bad = distance > args.max_distance_deg
@@ -307,7 +313,15 @@ def compute(args: argparse.Namespace) -> Path:
                 t_stop = min(nt, t_start + tb)
                 blk = {}
                 for v, (da, dt) in cropped.items():
-                    arr = _gather(np.asarray(da.isel({dt: slice(t_start, t_stop)}).transpose(dt, ln, on).values), i0, i1, weights)
+                    if v in off_axis:
+                        src_times = da[dt].values
+                        pad_lo = 1 if t_start > 0 else 0
+                        pad_hi = 1 if t_stop < len(src_times) else 0
+                        sub = da.isel({dt: slice(t_start - pad_lo, t_stop + pad_hi)})
+                        sub = sub.interp({dt: times[t_start:t_stop]}, method="linear")
+                    else:
+                        sub = da.isel({dt: slice(t_start, t_stop)})
+                    arr = _gather(np.asarray(sub.transpose(dt, ln, on).values), i0, i1, weights)
                     arr[:, bad] = np.nan
                     u = units[v]
                     if v == "rsds" and "kw" not in u:

@@ -35,8 +35,11 @@ def build(root: Path, interp_off_axis=False):
         if v == "rsds":
             data = np.abs(data)
         units = {"rsds": "W m-2", "tas": "K"}.get(v, "m s-1")
+        # rsds carries the reference axis offset by 90 minutes, like the real
+        # BCSD finals, so tas/uas/vas exercise the block-padded interpolation.
+        vt = times if v == "rsds" else times + pd.Timedelta(minutes=90)
         ds = xr.Dataset({f"{v}_bcsd": (("time", "lat", "lon"), data, {"units": units})},
-                        coords={"time": times, "lat": lat, "lon": lon})
+                        coords={"time": vt, "lat": lat, "lon": lon})
         fn = d / f"{v}_M_s_P1.nc"
         ds.to_netcdf(fn)
         fn.with_suffix(".nc.json").write_text(json.dumps(
@@ -61,10 +64,13 @@ def reference(lat, lon, times, root, tech):
     opened = {v: xr.open_dataset(p) for v, p in files.items()}
     try:
         ref = opened[m.VARS[tech][0]]
+        ref_times = ref.time.values
         i0, i1, w, dist = _match(ref.lat.values, ref.lon.values, stations, "nearest")
         arrays = {}
         for v, ds in opened.items():
             da = ds[f"{v}_bcsd"]
+            if not np.array_equal(da.time.values, ref_times):
+                da = da.interp({"time": ref_times}, method="linear")
             arrays[v] = _gather(np.asarray(da.transpose("time", "lat", "lon").values), i0, i1, w)
         if tech == "wind":
             return _wind_points(arrays["uas"], arrays["vas"])
