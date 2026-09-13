@@ -24,7 +24,10 @@ def render(a, model, scenario, patch, tech):
     if a.time: lines.append(f"#SBATCH --time={a.time}")
     cmd=["python", str(Path(a.project_dir)/"patchify_station_cf.py"), "--bcsd-root", a.bcsd_root, "--model", model, "--scenario", scenario, "--patch", patch, "--patch-manifest", a.patch_manifest, "--stations-csv", a.stations_csv, "--tech", tech, "--years", a.years, "--output-root", a.output_root]
     if a.overwrite: cmd.append("--overwrite")
-    lines += ["set -euo pipefail", "source /work/home/acbpgywfpz/miniconda3/bin/activate climate", f"mkdir -p {q(a.logs_dir)} {q(a.output_root)}", f"cd {q(a.project_dir)}", " ".join(q(x) for x in cmd)]
+    # The SCNet activation scripts reference optional variables (for example
+    # MAGPLUS_HOME).  Activate before enabling nounset so a valid job does not
+    # fail during environment setup.
+    lines += ["source /work/home/acbpgywfpz/miniconda3/bin/activate climate", "set -euo pipefail", f"mkdir -p {q(a.logs_dir)} {q(a.output_root)}", f"cd {q(a.project_dir)}", " ".join(q(x) for x in cmd)]
     return jid, "\n".join(lines)+"\n"
 
 def main(argv=None):
