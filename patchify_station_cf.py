@@ -156,6 +156,76 @@ def _wind_points(uas, vas):
     return compute_wind_cf_chunk(uas, vas, ws, pw, rated, power_law_ratio()).astype(np.float32)
 
 
+def _doy_hour(times) -> tuple[np.ndarray, np.ndarray]:
+    idx = pd.DatetimeIndex(times)
+    doy = idx.dayofyear.to_numpy(np.float32)
+    hour = (idx.hour.to_numpy(np.float32)
+            + idx.minute.to_numpy(np.float32) / 60.0
+            + idx.second.to_numpy(np.float32) / 3600.0)
+    return doy, hour.astype(np.float32)
+
+
+def _solar_points_block(rsds, tas, uas, vas, doy, hour, lats, lons):
+    # The solar kernels index stations as a leading batch axis crossed with
+    # lon (cos_sza would broadcast (T,B,B)), so keep the legacy per-station
+    # call shape (T,1,None); values are identical to the original loop.
+    out = np.empty(rsds.shape, dtype=np.float32)
+    for k in range(rsds.shape[1]):
+        got = compute_solar_cf_chunk(
+            rsds[:, k:k+1, None], tas[:, k:k+1, None], uas[:, k:k+1, None], vas[:, k:k+1, None],
+            doy, hour, np.array([lats[k]]), np.array([lons[k]]))
+        out[:, k] = np.asarray(got).reshape(-1)
+    return out
+
+
+class _StreamingStationWriter:
+    """netCDF4 writer that appends station CF time blocks without holding
+    the full (time, station) array in memory."""
+
+    def __init__(self, path, times, stations, var_name, args):
+        import netCDF4
+        self.path = Path(path)
+        self.var_name = var_name
+        self.ds = netCDF4.Dataset(self.path, "w", format="NETCDF4")
+        self.ds.createDimension("time", len(times))
+        self.ds.createDimension("station", len(stations))
+        t = self.ds.createVariable("time", "f8", ("time",))
+        t.units = "hours since 1970-01-01"; t.calendar = "standard"; t.standard_name = "time"
+        t[:] = times.astype("datetime64[ns]").astype(np.int64) / 3600e9
+        s = self.ds.createVariable("station", "i4", ("station",)); s[:] = np.arange(len(stations), dtype=np.int32)
+        s.long_name = "station index"
+        for name, values, dtype in (
+            ("station_id", np.asarray(stations.station_id.tolist(), dtype=object), str),
+            ("lon", stations.lon.to_numpy(np.float64), "f8"),
+            ("lat", stations.lat.to_numpy(np.float64), "f8"),
+            ("capacity_mw", stations.capacity_mw.to_numpy(np.float64).astype(np.float64), "f8"),
+        ):
+            v = self.ds.createVariable(name, dtype if dtype is str else dtype, ("station",))
+            if dtype is str:
+                v[:] = np.asarray(values, dtype=object)
+            else:
+                v[:] = values
+        cf = self.ds.createVariable(var_name, "f4", ("time", "station"),
+                                    zlib=True, complevel=args.compress_level)
+        cf.long_name = f"{args.tech} capacity factor"
+        self.cf = cf
+        self.ds.setncatts({
+            "source": "global_bcsd_patch", "model": args.model, "scenario": args.scenario,
+            "patch_id": args.patch, "tech": args.tech, "spatial_method": args.spatial_method,
+            "bcsd_files": json.dumps({k: str(v) for k, v in args._bcsd_files.items()}),
+            "station_only": "true",
+        })
+
+    def write(self, block, t_start):
+        self.cf[t_start:t_start + block.shape[0], :] = block
+
+    def __enter__(self): return self
+
+    def __exit__(self, *exc):
+        self.ds.close()
+        return False
+
+
 def compute(args: argparse.Namespace) -> Path:
     stations = load_stations(args.stations_csv, args.tech, args.scenario)
     if args.patch_manifest:
@@ -191,14 +261,15 @@ def compute(args: argparse.Namespace) -> Path:
         ref = ref.isel({tn: selected}); times = ref[tn].values
         i0, i1, weights, distance = _match(ref[ln].values, ref[on].values, stations, args.spatial_method)
         # Station gather only needs the grid rows/columns the interpolation
-        # touches. Crop each variable to those axes before materializing
-        # `.values`; patch files reach tens of GB, so the full-grid array
-        # would exhaust node memory while only a thin station slice is used.
+        # touches; crop to them before touching data. Dense patches (tens of
+        # thousands of stations spread over the whole grid) still need far
+        # more memory than a node offers if materialized at once, so the
+        # remaining pipeline streams in time blocks written straight to disk.
         used_lat = np.unique(i0); used_lon = np.unique(i1)
         lat_pos = np.full(i0.max() + 1, -1, dtype=np.int64); lat_pos[used_lat] = np.arange(len(used_lat))
         lon_pos = np.full(i1.max() + 1, -1, dtype=np.int64); lon_pos[used_lon] = np.arange(len(used_lon))
         i0 = lat_pos[i0]; i1 = lon_pos[i1]
-        arrays = {}
+        cropped = {}
         for v, ds in opened.items():
             da = _var(ds, v)
             dt = _coord(ds, ("time", "valid_time"))
@@ -206,27 +277,41 @@ def compute(args: argparse.Namespace) -> Path:
                 if v == "rsds":
                     raise ValueError(f"{v} must provide the reference time axis")
                 da = da.interp({dt: ref[tn]}, method="linear")
-            da = da.isel({ln: used_lat, on: used_lon})
-            arrays[v] = _gather(np.asarray(da.transpose(dt, ln, on).values), i0, i1, weights)
-            arrays[v][:, distance > args.max_distance_deg] = np.nan
-            units = str(da.attrs.get("units", "")).lower().replace(" ", "")
-            if v == "rsds":
-                # Existing solar kernel consumes kW m-2; global_bcsd final is
-                # normally W m-2, while preserving an explicit kW input.
-                if "kw" not in units:
-                    arrays[v] = arrays[v] / 1000.0
-            elif v == "tas":
-                if units in {"k", "kelvin"} or (not units and np.nanmedian(arrays[v]) > 100):
-                    arrays[v] = arrays[v] - 273.15
+            cropped[v] = (da.isel({ln: used_lat, on: used_lon}), dt)
+        units = {v: str(da.attrs.get("units", "")).lower().replace(" ", "") for v, (da, _dt) in cropped.items()}
+        bad = distance > args.max_distance_deg
+        doy, hour = _doy_hour(times)
+        lats = stations.lat.to_numpy(float); lons = stations.lon.to_numpy(float)
         if args.tech == "wind":
-            cf = _wind_points(arrays["uas"], arrays["vas"]); name = "wind_cf"
+            name = "wind_cf"
         else:
-            cf = _solar_points(arrays["rsds"], arrays["tas"], arrays["uas"], arrays["vas"], times, stations.lat.values, stations.lon.values); name = "solar_cf"
-        dsout = xr.Dataset({name: (("time", "station"), np.clip(cf, 0, 1).astype(np.float32))}, coords={"time": times, "station": np.arange(len(stations), dtype=np.int32), "station_id": ("station", np.asarray(stations.station_id.tolist(), dtype=object)), "lon": ("station", stations.lon.values), "lat": ("station", stations.lat.values), "capacity_mw": ("station", stations.capacity_mw.values.astype(np.float64))})
-        dsout.attrs.update(source="global_bcsd_patch", model=args.model, scenario=args.scenario, patch_id=args.patch, tech=args.tech, spatial_method=args.spatial_method, bcsd_files=json.dumps({k: str(v) for k,v in files.items()}), station_only="true")
-        out = Path(args.output_root) / args.model / args.scenario / args.patch / f"{args.tech}.nc"; out.parent.mkdir(parents=True, exist_ok=True)
+            name = "solar_cf"
+        nt, ns = len(times), len(stations)
+        tb = max(64, min(1024, int(1.5e9 // max(1, ns * 4 * 4))))
+        out = Path(args.output_root) / args.model / args.scenario / args.patch / f"{args.tech}.nc"
+        out.parent.mkdir(parents=True, exist_ok=True)
         if out.exists() and not args.overwrite: return out
-        tmp = out.with_suffix(out.suffix + f".partial.{os.getpid()}"); dsout.to_netcdf(tmp, engine="netcdf4", encoding={name: {"zlib": True, "complevel": args.compress_level, "dtype": "f4"}}); os.replace(tmp, out)
+        tmp = out.with_suffix(out.suffix + f".partial.{os.getpid()}")
+        args._bcsd_files = files
+        with _StreamingStationWriter(tmp, times, stations, name, args) as writer:
+            for t_start in range(0, nt, tb):
+                t_stop = min(nt, t_start + tb)
+                blk = {}
+                for v, (da, dt) in cropped.items():
+                    arr = _gather(np.asarray(da.isel({dt: slice(t_start, t_stop)}).transpose(dt, ln, on).values), i0, i1, weights)
+                    arr[:, bad] = np.nan
+                    u = units[v]
+                    if v == "rsds" and "kw" not in u:
+                        arr = arr / 1000.0
+                    elif v == "tas" and (u in {"k", "kelvin"} or (not u and np.nanmedian(arr) > 100)):
+                        arr = arr - 273.15
+                    blk[v] = arr
+                if args.tech == "wind":
+                    cf = _wind_points(blk["uas"], blk["vas"])
+                else:
+                    cf = _solar_points_block(blk["rsds"], blk["tas"], blk["uas"], blk["vas"], doy[t_start:t_stop], hour[t_start:t_stop], lats, lons)
+                writer.write(np.clip(cf, 0, 1).astype(np.float32), t_start)
+        os.replace(tmp, out)
         side = Path(str(out) + ".json"); side.write_text(json.dumps({"model": args.model, "scenario": args.scenario, "patch_id": args.patch, "tech": args.tech, "station_count": len(stations), "output": str(out)}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         return out
     finally:
