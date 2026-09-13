@@ -157,12 +157,17 @@ def _wind_points(uas, vas):
 
 
 def _doy_hour(times) -> tuple[np.ndarray, np.ndarray]:
-    idx = pd.DatetimeIndex(times)
-    doy = idx.dayofyear.to_numpy(np.float32)
-    hour = (idx.hour.to_numpy(np.float32)
-            + idx.minute.to_numpy(np.float32) / 60.0
-            + idx.second.to_numpy(np.float32) / 3600.0)
-    return doy, hour.astype(np.float32)
+    def _stamp(t):
+        return t if hasattr(t, "hour") else pd.Timestamp(t)
+    def _doy(t):
+        value = getattr(t, "dayofyr", None)
+        if value is None:
+            value = getattr(t, "dayofyear", None)
+        return value if value is not None else pd.Timestamp(t).dayofyear
+    doy = np.asarray([_doy(t) for t in times], np.float32)
+    hour = np.asarray([_stamp(t).hour + _stamp(t).minute / 60 + _stamp(t).second / 3600
+                       for t in times], np.float32)
+    return doy, hour
 
 
 def _solar_points_block(rsds, tas, uas, vas, doy, hour, lats, lons):
@@ -190,8 +195,12 @@ class _StreamingStationWriter:
         self.ds.createDimension("time", len(times))
         self.ds.createDimension("station", len(stations))
         t = self.ds.createVariable("time", "f8", ("time",))
-        t.units = "hours since 1970-01-01"; t.calendar = "standard"; t.standard_name = "time"
-        t[:] = times.astype("datetime64[ns]").astype(np.int64) / 3600e9
+        from xarray.coding.times import encode_cf_datetime
+        encoded, units, calendar = encode_cf_datetime(
+            times.astype("datetime64[ns]") if np.issubdtype(np.asarray(times).dtype, np.datetime64) else list(times),
+            "hours since 1970-01-01")
+        t.units = units; t.calendar = calendar; t.standard_name = "time"
+        t[:] = encoded
         s = self.ds.createVariable("station", "i4", ("station",)); s[:] = np.arange(len(stations), dtype=np.int32)
         s.long_name = "station index"
         for name, values, dtype in (
