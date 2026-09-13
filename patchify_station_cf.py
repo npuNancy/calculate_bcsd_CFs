@@ -222,7 +222,7 @@ def compute(args: argparse.Namespace) -> Path:
             cf = _wind_points(arrays["uas"], arrays["vas"]); name = "wind_cf"
         else:
             cf = _solar_points(arrays["rsds"], arrays["tas"], arrays["uas"], arrays["vas"], times, stations.lat.values, stations.lon.values); name = "solar_cf"
-        dsout = xr.Dataset({name: (("time", "station"), np.clip(cf, 0, 1).astype(np.float32))}, coords={"time": times, "station": np.arange(len(stations), dtype=np.int32), "station_id": ("station", stations.station_id.values), "lon": ("station", stations.lon.values), "lat": ("station", stations.lat.values), "capacity_mw": ("station", stations.capacity_mw.values.astype(np.float64))})
+        dsout = xr.Dataset({name: (("time", "station"), np.clip(cf, 0, 1).astype(np.float32))}, coords={"time": times, "station": np.arange(len(stations), dtype=np.int32), "station_id": ("station", np.asarray(stations.station_id.tolist(), dtype=object)), "lon": ("station", stations.lon.values), "lat": ("station", stations.lat.values), "capacity_mw": ("station", stations.capacity_mw.values.astype(np.float64))})
         dsout.attrs.update(source="global_bcsd_patch", model=args.model, scenario=args.scenario, patch_id=args.patch, tech=args.tech, spatial_method=args.spatial_method, bcsd_files=json.dumps({k: str(v) for k,v in files.items()}), station_only="true")
         out = Path(args.output_root) / args.model / args.scenario / args.patch / f"{args.tech}.nc"; out.parent.mkdir(parents=True, exist_ok=True)
         if out.exists() and not args.overwrite: return out
