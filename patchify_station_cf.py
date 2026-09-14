@@ -391,8 +391,6 @@ def _read_block_chunk(entries: list[tuple[xr.Dataset, np.ndarray]], variable: st
     numbers, values = numbers[order], values[order]
     keep = np.concatenate(([True], np.diff(numbers) > 0))
     numbers, values = numbers[keep], values[keep]
-    if numbers[0] > target_numbers[0] or numbers[-1] < target_numbers[-1]:
-        raise ValueError(f"source blocks do not bracket target time for {variable}")
     interpolated = xr.DataArray(values, dims=("time_num", "point"), coords={"time_num": numbers}).interp(time_num=target_numbers).values
     return _gather_points(np.asarray(interpolated, dtype=np.float32), local, weights)
 
