@@ -29,7 +29,9 @@ def render(a, model, scenario, patch, tech):
     # The SCNet activation scripts reference optional variables (for example
     # MAGPLUS_HOME).  Activate before enabling nounset so a valid job does not
     # fail during environment setup.
-    lines += ["source /work/home/acbpgywfpz/miniconda3/bin/activate climate", "set -euo pipefail", f"mkdir -p {q(a.logs_dir)} {q(a.output_root)}", f"cd {q(a.project_dir)}", " ".join(q(x) for x in cmd)]
+    lines += ["source /work/home/acbpgywfpz/miniconda3/bin/activate climate", "set -euo pipefail",
+              "export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1",
+              f"mkdir -p {q(a.logs_dir)} {q(a.output_root)}", f"cd {q(a.project_dir)}", " ".join(q(x) for x in cmd)]
     return jid, "\n".join(lines)+"\n"
 
 def main(argv=None):
