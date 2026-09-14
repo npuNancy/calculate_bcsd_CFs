@@ -15,7 +15,7 @@ def _token(x):
 
 def build_parser():
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--models", nargs="+", default=list(MODELS)); p.add_argument("--scenarios", nargs="+", default=list(SCENARIOS)); p.add_argument("--patches", nargs="+", required=True, metavar="PATCH"); p.add_argument("--techs", nargs="+", choices=TECHS, default=list(TECHS)); p.add_argument("--years", default="2015-2060"); p.add_argument("--bcsd-root", required=True); p.add_argument("--patch-manifest", required=True); p.add_argument("--stations-csv", required=True); p.add_argument("--output-root", required=True); p.add_argument("--project-dir", default=str(Path(__file__).resolve().parents[2])); p.add_argument("--jobs-dir", required=True); p.add_argument("--logs-dir", required=True); p.add_argument("--partition", default="wzhctest"); p.add_argument("--account", default=None); p.add_argument("--cpus-per-task", type=int, default=10); p.add_argument("--time", default=None); p.add_argument("--overwrite", action="store_true"); p.add_argument("--dry-run", action="store_true"); return p
+    p.add_argument("--models", nargs="+", default=list(MODELS)); p.add_argument("--scenarios", nargs="+", default=list(SCENARIOS)); p.add_argument("--patches", nargs="+", required=True, metavar="PATCH"); p.add_argument("--techs", nargs="+", choices=TECHS, default=list(TECHS)); p.add_argument("--years", default="2015-2060"); p.add_argument("--bcsd-root", required=True); p.add_argument("--patch-manifest", required=True); p.add_argument("--stations-csv", required=True); p.add_argument("--output-root", required=True); p.add_argument("--project-dir", default=str(Path(__file__).resolve().parents[2])); p.add_argument("--jobs-dir", required=True); p.add_argument("--logs-dir", required=True); p.add_argument("--partition", default="wzhctest"); p.add_argument("--account", default=None); p.add_argument("--cpus-per-task", type=int, default=10); p.add_argument("--time", default=None); p.add_argument("--input-mode", choices=("final", "block", "blocks", "auto"), default="final"); p.add_argument("--processes", type=int, default=8); p.add_argument("--parts-root", default=None); p.add_argument("--overwrite", action="store_true"); p.add_argument("--dry-run", action="store_true"); return p
 
 def render(a, model, scenario, patch, tech):
     jid=f"cfp_{model}_{scenario}_{patch}_{tech}"; q=shlex.quote
@@ -24,6 +24,8 @@ def render(a, model, scenario, patch, tech):
     if a.time: lines.append(f"#SBATCH --time={a.time}")
     cmd=["python", str(Path(a.project_dir)/"patchify_station_cf.py"), "--bcsd-root", a.bcsd_root, "--model", model, "--scenario", scenario, "--patch", patch, "--patch-manifest", a.patch_manifest, "--stations-csv", a.stations_csv, "--tech", tech, "--years", a.years, "--output-root", a.output_root]
     if a.overwrite: cmd.append("--overwrite")
+    cmd += ["--input-mode", a.input_mode, "--processes", str(a.processes)]
+    if a.parts_root: cmd += ["--parts-root", a.parts_root]
     # The SCNet activation scripts reference optional variables (for example
     # MAGPLUS_HOME).  Activate before enabling nounset so a valid job does not
     # fail during environment setup.
