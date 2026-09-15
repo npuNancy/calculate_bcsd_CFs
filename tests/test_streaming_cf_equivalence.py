@@ -102,7 +102,7 @@ def test_streaming_matches_reference():
                 "--bcsd-root", str(root / "bcsd"), "--model", "M", "--scenario", "s",
                 "--patch", "P1", "--patch-manifest", str(root / "patch_manifest.json"),
                 "--stations-csv", str(stations_csv), "--tech", tech,
-                "--years", "2015-2015", "--output-root", str(out_root), "--overwrite"])
+                "--years", "2015-2060", "--output-root", str(out_root), "--overwrite"])
             out = compute(args)
             got = xr.open_dataset(out)
             ref = reference(lat, lon, times, root, tech)

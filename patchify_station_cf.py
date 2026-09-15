@@ -25,6 +25,20 @@ from cf_physics import compute_solar_cf_chunk, compute_wind_cf_chunk, _get_power
 
 
 VARS = {"wind": ("uas", "vas"), "solar": ("rsds", "tas", "uas", "vas")}
+SUPPORTED_YEARS = "2015-2060"
+
+
+def _validate_years(value: str) -> str:
+    if value != SUPPORTED_YEARS:
+        raise ValueError(f"--years 目前只允许输入 {SUPPORTED_YEARS}，收到 {value!r}")
+    return value
+
+
+def _years_arg(value: str) -> str:
+    try:
+        return _validate_years(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 class BlockInputsMissing(FileNotFoundError):
@@ -652,6 +666,7 @@ class _StreamingStationWriter:
 
 
 def compute(args: argparse.Namespace) -> Path:
+    _validate_years(args.years)
     stations = load_stations(args.stations_csv, args.tech, args.scenario)
     stations = _select_patch_stations(stations, args.patch_manifest, args.patch)
     mode = getattr(args, "input_mode", "final")
@@ -764,7 +779,7 @@ def compute(args: argparse.Namespace) -> Path:
 
 def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="global_bcsd patch -> station-only CF")
-    p.add_argument("--bcsd-root", "--bcsd_root", required=True); p.add_argument("--model", required=True); p.add_argument("--scenario", required=True); p.add_argument("--patch", required=True); p.add_argument("--patch-manifest", default=None); p.add_argument("--stations-csv", "--stations_csv", required=True); p.add_argument("--tech", choices=("wind", "solar"), required=True); p.add_argument("--years", default="2015-2060"); p.add_argument("--output-root", "--output_root", required=True); p.add_argument("--spatial-method", choices=("nearest", "bilinear"), default="nearest"); p.add_argument("--max-distance-deg", type=float, default=0.15); p.add_argument("--compress-level", type=int, default=4); p.add_argument("--overwrite", action="store_true"); p.add_argument("--input-mode", choices=("final", "block", "blocks", "auto"), default="final"); p.add_argument("--processes", type=int, default=8); p.add_argument("--parts-root", default=None); return p
+    p.add_argument("--bcsd-root", "--bcsd_root", required=True); p.add_argument("--model", required=True); p.add_argument("--scenario", required=True); p.add_argument("--patch", required=True); p.add_argument("--patch-manifest", default=None); p.add_argument("--stations-csv", "--stations_csv", required=True); p.add_argument("--tech", choices=("wind", "solar"), required=True); p.add_argument("--years", type=_years_arg, default=SUPPORTED_YEARS, help=f"固定使用 {SUPPORTED_YEARS}"); p.add_argument("--output-root", "--output_root", required=True); p.add_argument("--spatial-method", choices=("nearest", "bilinear"), default="nearest"); p.add_argument("--max-distance-deg", type=float, default=0.15); p.add_argument("--compress-level", type=int, default=4); p.add_argument("--overwrite", action="store_true"); p.add_argument("--input-mode", choices=("final", "block", "blocks", "auto"), default="final"); p.add_argument("--processes", type=int, default=8); p.add_argument("--parts-root", default=None); return p
 
 
 if __name__ == "__main__":

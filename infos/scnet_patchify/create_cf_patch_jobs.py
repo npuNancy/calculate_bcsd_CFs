@@ -8,14 +8,19 @@ MODELS=("CANESM5","MPI-ESM1-2-HR","MRI-ESM2-0","BCC-CSM2-MR")
 SCENARIOS=("ssp126","ssp245","ssp585")
 TECHS=("wind","solar")
 PATCHES=()
+SUPPORTED_YEARS="2015-2060"
 
 def _token(x):
     if not re.fullmatch(r"[A-Za-z0-9_.-]+", x): raise ValueError(f"unsafe token {x!r}")
     return x
 
+def _years_arg(value):
+    if value != SUPPORTED_YEARS: raise argparse.ArgumentTypeError(f"--years 目前只允许输入 {SUPPORTED_YEARS}，收到 {value!r}")
+    return value
+
 def build_parser():
     p=argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--models", nargs="+", default=list(MODELS)); p.add_argument("--scenarios", nargs="+", default=list(SCENARIOS)); p.add_argument("--patches", nargs="+", required=True, metavar="PATCH"); p.add_argument("--techs", nargs="+", choices=TECHS, default=list(TECHS)); p.add_argument("--years", default="2015-2060"); p.add_argument("--bcsd-root", required=True); p.add_argument("--patch-manifest", required=True); p.add_argument("--stations-csv", required=True); p.add_argument("--output-root", required=True); p.add_argument("--project-dir", default=str(Path(__file__).resolve().parents[2])); p.add_argument("--jobs-dir", required=True); p.add_argument("--logs-dir", required=True); p.add_argument("--partition", default="wzhctest"); p.add_argument("--account", default=None); p.add_argument("--cpus-per-task", type=int, default=10); p.add_argument("--time", default=None); p.add_argument("--input-mode", choices=("final", "block", "blocks", "auto"), default="final"); p.add_argument("--processes", type=int, default=8); p.add_argument("--parts-root", default=None); p.add_argument("--overwrite", action="store_true"); p.add_argument("--dry-run", action="store_true"); return p
+    p.add_argument("--models", nargs="+", default=list(MODELS)); p.add_argument("--scenarios", nargs="+", default=list(SCENARIOS)); p.add_argument("--patches", nargs="+", required=True, metavar="PATCH"); p.add_argument("--techs", nargs="+", choices=TECHS, default=list(TECHS)); p.add_argument("--years", type=_years_arg, default=SUPPORTED_YEARS, help=f"固定使用 {SUPPORTED_YEARS}"); p.add_argument("--bcsd-root", required=True); p.add_argument("--patch-manifest", required=True); p.add_argument("--stations-csv", required=True); p.add_argument("--output-root", required=True); p.add_argument("--project-dir", default=str(Path(__file__).resolve().parents[2])); p.add_argument("--jobs-dir", required=True); p.add_argument("--logs-dir", required=True); p.add_argument("--partition", default="wzhctest"); p.add_argument("--account", default=None); p.add_argument("--cpus-per-task", type=int, default=10); p.add_argument("--time", default=None); p.add_argument("--input-mode", choices=("final", "block", "blocks", "auto"), default="final"); p.add_argument("--processes", type=int, default=8); p.add_argument("--parts-root", default=None); p.add_argument("--overwrite", action="store_true"); p.add_argument("--dry-run", action="store_true"); return p
 
 def render(a, model, scenario, patch, tech):
     jid=f"cfp_{model}_{scenario}_{patch}_{tech}"; q=shlex.quote
