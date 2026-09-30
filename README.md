@@ -1,6 +1,6 @@
 # BCSD 全格点容量因子
 
-`patchify_grid_cf.py` 从 BCSD production_v2 的年份 point blocks 计算全格点风电或光伏容量因子，
+`patchify_grid_cf.py` 从 BCSD production_v2 的年份 point blocks 或完整年份气象 NC 计算全格点风电或光伏容量因子，
 输出 `wind_cf(time, lat, lon)` 或 `solar_cf(time, lat, lon)` NetCDF。
 坐标来自同批次 land plan 的 patch core，保留完整矩形网格；海洋和必要气象输入缺失的位置写缺测。
 有效零出力仍为 `0`，CF 为 float32、范围 `[0,1]`。
@@ -23,7 +23,7 @@
   --land-plan /work/home/acbw9wpn5k/bcsd/global_bcsd/production_v1/shared/land_plan.nc \
   --tech solar --years 2015-2060 \
   --input-units tas=K rsds=W/m2 uas=m/s vas=m/s \
-  --processes 8 --tile-shape 64 64 --time-chunk 240 \
+  --input-mode auto --processes 8 --tile-shape 64 64 --time-chunk 240 \
   --compress-level 2 --output-root /path/to/cf_grid/run1
 ```
 
@@ -37,16 +37,20 @@ GE120/2500、100 m 幂律外推、25 m/s切出；Erbs辐射分解、双轴跟踪
 输入约定：
 
 - 从 `manifests/<model>__<scenario>__<variable>__<patch>.json` 解析年份合同和文件名；
-  气象文件仅从当前 `--bcsd-root/blocks/<model>/<scenario>/<variable>/<patch>/` 读取。
+  `--input-mode auto` 默认检查整个 unit 的所需变量：全部 blocks 及 sidecar 存在则从
+  `--bcsd-root/blocks/<model>/<scenario>/<variable>/<patch>/` 读取；任一缺失则整个 unit
+  从 `outputs/<model>/<scenario>/<variable>/` 的最终 NC 读取。`blocks` / `final` 可显式固定来源。
   实测 manifest 存在旧根目录绝对路径，reader 保留并验证其目录身份，将根定位到当前批次，
-  再要求对应 block sidecar 的输出路径指向实际文件。
-- 四类气象 block 的实测 header 缺少单位。`--input-units VAR=UNIT` 是显式单位声明，
+  再要求对应 sidecar 的输出路径指向实际文件。完整 NC 按 manifest 八个年份合同划分时间索引，
+  每个 spawn worker 独立只读打开同一输入文件，按时间和空间小块读取，分别写自己的 CF 年份文件。
+- 四类气象输入的部分 header 缺少单位。`--input-units VAR=UNIT` 是显式单位声明，
   仅补充缺失元数据；若与文件已有单位冲突则报错。上例沿用既有 CF 的 K、W/m²、m/s 合同，
   若换用其他生产批次，应确认后填写。缺单位且未指定时停止，不按数据值猜测。
 - wind 参考 `uas.time`，solar 参考 `rsds.time`；按真实时间邻点线性插值，必要时读取相邻年份块边界。
   不外推，不跨数据缺口插值。支持 Gregorian/proleptic Gregorian 与 noleap/365_day，3小时时间步。
 - `--years` 必须等于 manifest 全部合同段的连续范围，生产默认2015–2060；本地夹具可使用较短完整年份合同。
-- 所有变量、年份的点身份、顺序和有效域必须一致；与 land plan 冲突、缺文件或 sidecar 时立即报错。
+- blocks 的点身份、顺序和有效域必须一致；final 的网格坐标、shape、时间轴及 sidecar 必须匹配。
+  已有文件损坏、权限失败或身份冲突不会触发回退；选定来源缺文件则报错。
 
 ## 输出与恢复
 
@@ -66,7 +70,7 @@ GE120/2500、100 m 幂律外推、25 m/s切出；Erbs辐射分解、双轴跟踪
 年份文件是持久结果，不自动清理。默认八块及sidecar通过验证即完成；请求合并时必须等合并文件验证完成。
 在原命令上追加 `--merge-final`，可复用八个已完成文件，仅补做合并。
 
-输入身份、源码摘要、关键依赖、物理参数、网格、单位和分块/编码配置绑定结果身份；
+输入来源（blocks/final）、输入身份、源码摘要、关键依赖、物理参数、网格、单位和分块/编码配置绑定结果身份；
 进程数与合并开关不影响年份文件身份。参数或输入变更须换输出根，或显式 `--overwrite` 重建。
 文件缺失、sidecar损坏、文件stat/header不匹配时重算相应年份；合并中断保留年份文件供恢复。
 使用 unit 和输出文件锁、独有临时文件及原子发布，防止重复运行同时写同一路径。

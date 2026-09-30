@@ -11,8 +11,8 @@ import uuid
 
 import netCDF4 as nc
 import numpy as np
+from grid_cf_sources import VARS, relocated_path, select_sources
 
-VARS = {"wind": ("uas", "vas"), "solar": ("rsds", "tas", "uas", "vas")}
 FILL = np.float32(9.96921e36)
 TIME_UNITS = "hours since 1970-01-01 00:00:00"
 CALENDARS = {"standard": "gregorian", "gregorian": "gregorian",
@@ -140,6 +140,8 @@ def _axis(ds, key):
 def load_plan(args):
     """Read metadata only; validate all variables/years before starting workers."""
     root = Path(args.bcsd_root).expanduser().resolve()
+    mode, sources, _ = select_sources(root, args.model, args.scenario, args.tech, args.patch,
+                                     getattr(args, "input_mode", "auto"))
     patch_path = Path(args.patch_manifest).expanduser().resolve()
     land_path = Path(args.land_plan).expanduser().resolve()
     inputs = [file_identity(patch_path, True), file_identity(land_path)]
@@ -158,6 +160,8 @@ def load_plan(args):
     if not (ysel.size and xsel.size) or not (0 < e-w <= 360 and -90 <= south < north <= 90):
         raise ValueError("empty/invalid patch core")
     expected_mask = mask[np.ix_(ysel, xsel)].astype(np.int8)
+    if mode == "final":
+        return load_final_plan(args, root, sources, inputs, land_path, lat[ysel], lon[xsel], expected_mask)
     ymap = np.full(len(lat), -1, dtype=np.int64); ymap[ysel] = np.arange(len(ysel))
     xmap = np.full(len(lon), -1, dtype=np.int64); xmap[xsel] = np.arange(len(xsel))
     blocks, contracts, reference_points, ref_calendar = {}, None, None, None
@@ -268,9 +272,82 @@ def load_plan(args):
     domain = np.zeros(expected_mask.shape, dtype=np.int8); domain[ly, lx] = 1
     if not np.array_equal(domain, expected_mask):
         raise ValueError("block points differ from land plan domain")
-    return {"contracts": contracts, "blocks": blocks, "inputs": inputs,
+    return {"input_mode": "blocks", "contracts": contracts, "blocks": blocks, "inputs": inputs,
             "lat": lat[ysel], "lon": lon[xsel], "mask": domain, "y": ly, "x": lx,
             "grid_fingerprint": array_digest(lat[ysel], lon[xsel], domain)}
+
+
+def load_final_plan(args, root, sources, inputs, land_path, lat, lon, domain):
+    """Validate final metadata and split its time coordinate into manifest years."""
+    import cftime
+    contracts, ref_calendar, blocks = None, None, {}
+    for variable, record in sources.items():
+        meta = record["meta"]
+        current = [{"start_year": int(c["start_year"]), "end_year": int(c["end_year"])}
+                   for c in meta["time_block_contract"]["blocks"]]
+        if (not current or len(current) > 8 or any(c["start_year"] > c["end_year"] for c in current)
+                or any(b["start_year"] != a["end_year"]+1 for a, b in zip(current, current[1:]))):
+            raise ValueError("invalid year-block contract")
+        if contracts is None:
+            contracts = current
+        elif contracts != current:
+            raise ValueError("variables have different year-block contracts")
+        plans = [meta["land_plan"]] if meta.get("land_plan") else [t["land_plan_path"] for t in meta["block_tasks"]]
+        if not plans or any(_path(p, root) != land_path for p in plans):
+            raise ValueError("land plan differs from manifest")
+        path = record["final"]
+        side = Path(str(path)+".json")
+        sm = read_json(side)
+        if (sm.get("kind") != "global-final-patch" or sm.get("patch_id") != args.patch
+                or sm.get("variable") != variable
+                or relocated_path(sm["output"], root, ("outputs", args.model, args.scenario, variable)) != path):
+            raise ValueError(f"final sidecar identity mismatch: {side}")
+        inputs.extend([file_identity(record["manifest"], True), file_identity(path), file_identity(side, True)])
+        with nc.Dataset(path) as ds:
+            if getattr(ds, "patch_id", None) != args.patch or ds[variable].dimensions != ("time", "lat", "lon"):
+                raise ValueError(f"final schema/patch mismatch: {path}")
+            if not np.array_equal(_axis(ds, "lat"), lat) or not np.array_equal(_axis(ds, "lon"), lon):
+                raise ValueError(f"final grid differs from land plan: {path}")
+            if (sm.get("shape") != list(ds[variable].shape) or sm.get("time_count") != len(ds["time"])
+                    or sm.get("land_point_count") != int(domain.sum())):
+                raise ValueError(f"final sidecar shape/domain mismatch: {side}")
+            t = ds["time"]; raw = np.asarray(t[:])
+            units, calendar = getattr(t, "units", ""), getattr(t, "calendar", "standard")
+            if calendar not in CALENDARS or t.dimensions != ("time",) or len(raw) < 2 or not np.isfinite(raw).all():
+                raise ValueError(f"invalid calendar/time axis: {path}")
+            cal = CALENDARS[calendar]
+            if ref_calendar is None:
+                ref_calendar = cal
+            elif ref_calendar != cal:
+                raise ValueError("incompatible calendars across final inputs")
+            numeric = numbers(raw, units, calendar)
+            if not np.allclose(np.diff(numeric), 3., rtol=0, atol=1e-8):
+                raise ValueError(f"time gap/duplicate or non-3-hour axis: {path}")
+            declared = getattr(ds[variable], "units", "")
+            supplied = getattr(args, "input_units", {}).get(variable)
+            if declared and supplied and conversion(variable, declared) != conversion(variable, supplied):
+                raise ValueError(f"explicit units conflict with file metadata: {path}")
+            scale, offset = conversion(variable, declared or supplied or "")
+            entries = []
+            for contract in contracts:
+                begin = nc.date2num(cftime.datetime(contract["start_year"], 1, 1, calendar=cal), TIME_UNITS, cal)
+                end = nc.date2num(cftime.datetime(contract["end_year"]+1, 1, 1, calendar=cal), TIME_UNITS, cal)
+                a, b = map(int, np.searchsorted(numeric, [begin, end]))
+                if b-a < 2 or not (0 <= numeric[a]-begin <= 3 and 0 < end-numeric[b-1] <= 3):
+                    raise ValueError(f"incomplete year coverage: {path}")
+                entries.append({"path": str(path), "raw": raw[a:b], "units": units, "calendar": calendar,
+                                "numbers": numeric[a:b], "scale": scale, "offset": offset,
+                                "source_start": a, "source_stop": b})
+            if entries[0]["source_start"] != 0 or entries[-1]["source_stop"] != len(raw):
+                raise ValueError(f"final time axis extends beyond manifest contract: {path}")
+            blocks[variable] = entries
+    year_range = f"{contracts[0]['start_year']}-{contracts[-1]['end_year']}"
+    if args.years != year_range:
+        raise ValueError(f"--years must match complete manifest contract: {year_range}")
+    ly, lx = np.where(domain)
+    return {"input_mode": "final", "contracts": contracts, "blocks": blocks, "inputs": inputs,
+            "lat": lat, "lon": lon, "mask": domain, "y": ly, "x": lx,
+            "grid_fingerprint": array_digest(lat, lon, domain)}
 
 
 def tiles(plan, shape):
@@ -299,6 +376,19 @@ class BlockReader:
         left = np.where(exact, right, np.maximum(right-1, 0))
         valid = (targets >= self.times[0]-1e-8) & (targets <= self.times[-1]+1e-8)
         lo, hi = int(left.min()), int(right.max())+1
+        source = self.read_source(lo, hi, positions)
+        lval, rval = source[left-lo], source[right-lo]
+        denom = self.times[right]-self.times[left]
+        weight = np.divide(targets-self.times[left], denom, out=np.zeros_like(targets), where=denom != 0)
+        result = np.where(exact[:, None], rval, lval + (rval-lval)*weight[:, None]).astype(np.float32)
+        result[~valid] = np.nan
+        if self.entries[0]["scale"] == 0.001:
+            result /= 1000.0
+        if self.entries[0]["offset"]:
+            result += self.entries[0]["offset"]
+        return result
+
+    def read_source(self, lo, hi, positions):
         source = np.empty((hi-lo, len(positions)), dtype=np.float32)
         # positions are sorted; adjacent disk columns are read in a single slice.
         edges = np.r_[0, np.flatnonzero(np.diff(positions) != 1)+1, len(positions)]
@@ -316,16 +406,32 @@ class BlockReader:
                 values[~np.isfinite(values)] = np.nan
                 source[a-lo:b-lo, r0:r1] = values
                 self.read_bytes += values.nbytes
-        lval, rval = source[left-lo], source[right-lo]
-        denom = self.times[right]-self.times[left]
-        weight = np.divide(targets-self.times[left], denom, out=np.zeros_like(targets), where=denom != 0)
-        result = np.where(exact[:, None], rval, lval + (rval-lval)*weight[:, None]).astype(np.float32)
-        result[~valid] = np.nan
-        if self.entries[0]["scale"] == 0.001:
-            result /= 1000.0
-        if self.entries[0]["offset"]:
-            result += self.entries[0]["offset"]
-        return result
+        return source
+
+
+class FinalReader(BlockReader):
+    """Independent read-only file handle; bounded time and spatial hyperslabs."""
+    def __init__(self, entries, variable, plan):
+        super().__init__(entries, variable)
+        self.y, self.x = plan["y"], plan["x"]
+
+    def read_source(self, lo, hi, positions):
+        if not self.opened:
+            self.opened[0] = self.stack.enter_context(nc.Dataset(self.entries[0]["path"]))
+            self.opened[0][self.variable].set_var_chunk_cache(64*1024**2, 1009, 0.75)
+        yy, xx = self.y[positions], self.x[positions]
+        y0, y1, x0, x1 = int(yy.min()), int(yy.max())+1, int(xx.min()), int(xx.max())+1
+        raw = self.opened[0][self.variable][lo:hi, y0:y1, x0:x1]
+        values = np.asarray(np.ma.filled(raw, np.nan), dtype=np.float32)
+        values[~np.isfinite(values)] = np.nan
+        self.read_bytes += values.nbytes
+        return values[:, yy-y0, xx-x0]
+
+
+def input_reader(plan, variable):
+    if plan["input_mode"] == "final":
+        return FinalReader(plan["blocks"][variable], variable, plan)
+    return BlockReader(plan["blocks"][variable], variable)
 
 
 def create_output(path, plan, axis, args, identity):
@@ -350,7 +456,7 @@ def create_output(path, plan, axis, args, identity):
         v.units = "1"; v.long_name = args.tech + " capacity factor"; v.valid_range = np.array([0, 1], dtype="f4")
         ds.setncatts({"schema_version": 1, "model": args.model, "scenario": args.scenario, "patch_id": args.patch,
                      "tech": args.tech, "identity": identity, "grid_fingerprint": plan["grid_fingerprint"],
-                     "input_mode": "blocks", "missing_policy": "outside domain or any required input nonfinite"})
+                     "input_mode": plan["input_mode"], "missing_policy": "outside domain or any required input nonfinite"})
         return ds
     except BaseException:
         ds.close()

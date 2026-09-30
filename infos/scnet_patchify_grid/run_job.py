@@ -17,7 +17,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(HERE))
-from create_jobs import MODELS, SCENARIOS, TECHS, catalog, unit_id
+from create_jobs import MODELS, SCENARIOS, TECHS, catalog, unit_id, read_inventory
 
 
 def sha256(path):
@@ -71,6 +71,14 @@ def preflight(args):
     if release_hash != require_env("CF_RELEASE_SHA256"):
         raise ValueError("campaign release changed")
     release = json.loads(release_path.read_text())
+    inventory_path = inside(require_env("CF_INPUT_INVENTORY"), shared)
+    if (str(inventory_path) != release["input_inventory"]["path"]
+            or sha256(inventory_path) != release["input_inventory"]["sha256"]
+            or sha256(inventory_path) != args.input_inventory_sha256):
+        raise ValueError("input inventory differs from frozen release/job pack")
+    inventory_row = read_inventory(inventory_path)[unit_id(args.model, args.scenario, args.tech, args.patch)]
+    if inventory_row["input_mode"] != args.input_mode:
+        raise ValueError("job input mode differs from frozen inventory")
     if (release["release"] != "production_v2" or release["run_id"] != run_id
             or release["code_sha"] != head or release["models"] != list(MODELS)
             or release["years"] != "2015-2060" or release["bcsd_spot_check_accepted"] is not True
@@ -79,6 +87,8 @@ def preflight(args):
     bcsd = Path(require_env("CF_BCSD_ROOT")).resolve(strict=True)
     if str(bcsd) != release["bcsd_root"]:
         raise ValueError("BCSD root differs from frozen release")
+    if inventory_row["bcsd_root"] != str(bcsd):
+        raise ValueError("input inventory BCSD root differs from release")
     land = Path(require_env("CF_LAND_PLAN")).resolve(strict=True)
     patch = Path(require_env("CF_PATCH_MANIFEST")).resolve(strict=True)
     if stat_identity(land) != release["land_plan"]:
@@ -90,7 +100,7 @@ def preflight(args):
     units = release["input_units"]
     if set(units) != {"uas", "vas", "tas", "rsds"}:
         raise ValueError("release must declare all four CF input units")
-    # Only frozen metadata is checked here. The compute entry validates this unit's blocks.
+    # Only frozen metadata is checked here. The compute entry validates this unit's selected inputs.
     return {"user": user, "job_id": job_id, "run_id": run_id, "shared": shared,
             "release_path": release_path, "release_hash": release_hash, "bcsd": bcsd,
             "land": land, "patch": patch, "units": units}
@@ -103,6 +113,7 @@ def compute_arguments(args, runtime):
               "--tech", args.tech, "--patch", args.patch, "--patch-manifest", str(runtime["patch"]),
               "--land-plan", str(runtime["land"]), "--years", "2015-2060",
               "--output-root", str(runtime["shared"] / "outputs"), "--processes", str(args.processes),
+              "--input-mode", args.input_mode,
               "--tile-shape", *map(str, args.tile_shape), "--time-chunk", str(args.time_chunk),
               "--compress-level", str(args.compress_level), "--input-units",
               *[f"{v}={runtime['units'][v]}" for v in variables]]
@@ -123,6 +134,8 @@ def receipt_evidence(manifest, args, shared):
             raise ValueError(f"CF manifest {key} mismatch")
     if p["implementation"]["code_sha"] != args.code_sha:
         raise ValueError("CF code identity mismatch")
+    if p["input_mode"] != args.input_mode:
+        raise ValueError("CF input mode mismatch")
     artifacts = []
     for block in m["blocks"]:
         path = inside(block["path"], shared)
@@ -149,6 +162,8 @@ def parser():
     p.add_argument("--patch", required=True)
     p.add_argument("--code-sha", required=True)
     p.add_argument("--resource-profile", required=True)
+    p.add_argument("--input-mode", choices=("blocks", "final"), required=True)
+    p.add_argument("--input-inventory-sha256", required=True)
     p.add_argument("--processes", type=int, default=8)
     p.add_argument("--tile-shape", type=int, nargs=2, default=[64, 64])
     p.add_argument("--time-chunk", type=int, default=240)
@@ -173,6 +188,7 @@ def main(argv=None):
                          "submit_username": runtime["user"], "slurm_job_id": runtime["job_id"],
                          "code_sha": args.code_sha, "release_sha256": runtime["release_hash"],
                          "resource_profile": args.resource_profile, "elapsed_seconds": time.monotonic()-start,
+                         "input_mode": args.input_mode, "input_inventory_sha256": args.input_inventory_sha256,
                          "merge_final": args.merge_final, **evidence})
     print(json.dumps({"unit_id": uid, "receipt": str(receipt)}, ensure_ascii=False))
 

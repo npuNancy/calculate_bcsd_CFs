@@ -11,7 +11,7 @@
 |---|---|
 | 计算入口 | `run_job.py` → `patchify_grid_cf.compute` |
 | 一个Slurm作业 | 一个完整unit；默认8个spawn worker处理八个年份块 |
-| 上游 | production_v2的point blocks、sidecar、manifest及其共享land plan |
+| 上游 | production_v2 的 blocks 或 final、sidecar、manifest及共享land plan；按unit冻结来源 |
 | 默认结果 | 八个 `(time,lat,lon)` CF年份NC及sidecar、unit manifest、Job receipt |
 | 可选合并 | `--merge-final` 默认False；开启后父进程在同一作业内合并 |
 | 完成计数 | 每model/SSP有47×2=94 unit，每格完成数/94 |
@@ -19,7 +19,14 @@
 
 BCSD已抽检通过，直接接受此前提。准备和监控不得另做全量BCSD扫描、全文件hash或逐块数组审核。
 计算入口在计算节点核验当前unit输入属于必要合同检查，不是重复全campaign预检。
-当前manifest中存在旧根路径，reader会按目录身份定位当前production_v2/blocks；land plan的旧共享路径可合法复用。
+当前manifest中存在旧根路径，reader会按目录身份定位当前production_v2/blocks或outputs；land plan的旧共享路径可合法复用。
+
+输入选择：wind 检查 uas/vas；solar 检查 rsds/tas/uas/vas。全部年份NC及sidecar存在才选blocks，
+否则整个unit选final，不混合两种布局。计算入口默认auto；生产脚本显式固定分类的blocks/final。
+完整NC只按时间/空间切片读取；默认8个独立只读进程，每个写一个年份结果。详见[输入来源与并行](输入来源与并行.md)。
+
+本次输入实现、来源或分类发生变化时使用新RUN_ID、release及完整脚本包。旧运行已停止，
+保留台账、日志和产物，不恢复旧控制循环，不原地覆盖旧结果。重新启动生产须用户另行授权。
 
 ## 2. 角色与持久路径
 
@@ -27,7 +34,7 @@ BCSD已抽检通过，直接接受此前提。准备和监控不得另做全量B
 
 ```text
 1872：/work/home/acjpoxgsdu/cf_grid/<RUN_ID>/
-    inputs/patch_manifest.json、release.json
+    inputs/patch_manifest.json、input_inventory.csv、release.json
     outputs/<model>/<scenario>/<patch>/<tech>/manifest.json
     outputs/<model>/<scenario>/<patch>/<tech>/blocks/<identity>/cf_<years>.nc[.json]
     runtime/units.json、observations.jsonl、submissions.jsonl、reassignments.jsonl
@@ -100,7 +107,7 @@ OOM需依据资源证据增加CPU/内存或降低worker数后再试；仅变更C
 ## 7. 成功与终止
 
 成功须同时满足：Slurm COMPLETED且ExitCode=0:0；对应JobID的COMPLETED receipt；unit manifest为COMPLETED；八个年份NC和sidecar存在、非partial、身份及stat匹配；1872可访问所有产物。
-请求合并时还需final及sidecar完成；默认不要求final。receipt的run/unit/user/JobID、code SHA、release hash、profile和manifest身份须与台账一致。
+请求合并时还需final及sidecar完成；默认不要求final。receipt的run/unit/user/JobID、code SHA、release hash、profile、input_mode、input_inventory_sha256和manifest身份须与台账一致。
 squeue消失、文件存在或旧场站结果均不算成功。NC数组校验由计算入口在计算节点完成，监控仅用轻量证据。
 
 只有全部1,128 unit succeeded，4×3单元格均94/94，且无active/submitting/retryable/incomplete/blocked/unknown，才能结束goal。

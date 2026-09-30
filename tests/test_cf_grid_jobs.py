@@ -85,6 +85,7 @@ def test_compute_contract(tmp_path, tech, merge):
     args = runner.parser().parse_args([
         "--model", "CANESM5", "--scenario", "ssp126", "--tech", tech,
         "--patch", "R02C09", "--code-sha", SHA, "--resource-profile", "test",
+        "--input-mode", "final", "--input-inventory-sha256", "b" * 64,
         *(["--merge-final"] if merge else []),
     ])
     runtime = {"bcsd": tmp_path / "bcsd", "shared": tmp_path / "shared",
@@ -92,7 +93,7 @@ def test_compute_contract(tmp_path, tech, merge):
                "units": {"uas": "m/s", "vas": "m/s", "tas": "K", "rsds": "W/m2"}}
     computed = runner.compute_arguments(args, runtime)
     assert computed.processes == 8 and computed.merge_final is merge
-    assert computed.years == "2015-2060"
+    assert computed.years == "2015-2060" and computed.input_mode == "final"
     assert Path(computed.output_root) == runtime["shared"] / "outputs"
     assert computed.overwrite is False and computed.parts_root is None
     assert len(computed.input_units) == (2 if tech == "wind" else 4)
@@ -102,11 +103,12 @@ def test_compute_contract(tmp_path, tech, merge):
 
 def receipt_fixture(root, merge=False):
     args = SimpleNamespace(model="CANESM5", scenario="ssp126", tech="wind", patch="R02C09",
-                           code_sha=SHA, merge_final=merge)
+                           code_sha=SHA, merge_final=merge, input_mode="blocks")
     state = {"identity": "unit-identity", "status": "COMPLETED", "merge_final": merge,
              "provenance": {k: getattr(args, k) for k in ("model", "scenario", "tech", "patch")},
              "blocks": []}
     state["provenance"]["implementation"] = {"code_sha": SHA}
+    state["provenance"]["input_mode"] = "blocks"
     for i in range(8 + int(merge)):
         path = root / f"cf_{i}.nc"
         path.write_bytes(b"receipt stat fixture")
@@ -160,3 +162,22 @@ def test_aggregator_cannot_run(monkeypatch):
     monkeypatch.setattr(runner.pwd, "getpwuid", lambda _: SimpleNamespace(pw_name="acjpoxgsdu"))
     with pytest.raises(ValueError, match="unauthorized"):
         runner.preflight(SimpleNamespace(patch="R02C09"))
+
+
+def test_inventory_pins_job_inputs(tmp_path):
+    manifest, scripts = jobs.build(arguments(tmp_path))
+    inventory = jobs.read_inventory(HERE/'input_inventory.csv')
+    for r in manifest['jobs']:
+        assert r['input_mode'] == inventory[r['unit_id']]['input_mode']
+        assert '--input-mode '+r['input_mode'] in scripts[r['script']]
+        assert r['input_inventory_sha256'] == manifest['input_inventory_sha256']
+    assert Counter(r['input_mode'] for r in manifest['jobs']) == {'blocks':605, 'final':523}
+    bad=tmp_path/'bad.csv';bad.write_text((HERE/'input_inventory.csv').read_text().splitlines()[0]+'\n')
+    with pytest.raises(ValueError,match='1,128'):
+        jobs.build(arguments(tmp_path/'pack','--input-inventory',str(bad)))
+
+
+def test_receipt_rejects_changed_input_mode(tmp_path):
+    args,manifest,state=receipt_fixture(tmp_path)
+    state['provenance']['input_mode']='final';manifest.write_text(json.dumps(state))
+    with pytest.raises(ValueError,match='input mode'):runner.receipt_evidence(manifest,args,tmp_path)

@@ -8,7 +8,8 @@
 `/work/home/acjpoxgsdu/cf_grid/<RUN_ID>/outputs/`，通过ACL授权。
 乌镇1872不运行计算作业；14个计算账号以 [accounts.csv](accounts.csv) 为准。
 BCSD production_v2 根目录为 `/work/share/aczlvkl1ac/bcsd_runs/production_v2/`，
-`outputs/` 保存完整气象文件，CF实际读取同级 `blocks/`，具体文件由manifest解析。
+`outputs/` 保存完整气象文件。整个 unit 的所需 blocks/sidecar 齐全时优先读取 blocks；
+任一缺失则从 outputs 按年份切片读取。来源由 [input_inventory.csv](input_inventory.csv) 冻结。
 上游已经抽检，不增加全量BCSD检查。
 
 ## 文件
@@ -20,6 +21,8 @@ BCSD production_v2 根目录为 `/work/share/aczlvkl1ac/bcsd_runs/production_v2/
 | [作业组合提交顺序](作业分工/作业组合提交顺序.md) | 优先级、初始分工及动态重分配 |
 | `accounts.csv`、`作业分工/patch_assignment.csv` | 账号角色与47个patch初始归属 |
 | `create_jobs.py` | 标准库作业生成器，不SSH、不提交、不读取气象数组 |
+| `audit_inputs.py`、`input_inventory.csv` | 只读元数据清点与全部1,128个unit的输入分类 |
+| [输入来源与并行](输入来源与并行.md) | 分类统计、并行选择及版本化要求 |
 | `run_job.py` | 计算节点适配器，核对配置并调用已有CF入口，写完成receipt |
 | [正式运行提示词](develop-patch-grid_正式运行提示词.md) | 3800–4000 UTF-16字符，供CodingAgent启动goal |
 | `completion_status/progress.md` | 被Git忽略的极简进度表；首次准备从goal中的模板创建 |
@@ -28,7 +31,7 @@ BCSD production_v2 根目录为 `/work/share/aczlvkl1ac/bcsd_runs/production_v2/
 
 ```bash
 python3 infos/scnet_patchify_grid/create_jobs.py \
-  --jobs-dir "$HOME/cf_grid_runs/$CF_RUN_ID/jobs/cf_grid_v2_v1" \
+  --jobs-dir "$HOME/cf_grid_runs/$CF_RUN_ID/jobs/cf_grid_v2_v2" \
   --code-sha <完整40位部署SHA> --dry-run
 ```
 

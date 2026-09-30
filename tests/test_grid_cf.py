@@ -334,3 +334,107 @@ def test_negative_time_offset_and_input_change(tmp_path):
     p=data['root']/'patches.json'
     p.write_text(p.read_text()+'\n')
     with pytest.raises(ValueError,match='different inputs/configuration'): grid.compute(a)
+
+
+def publish_final_inputs(data):
+    """Publish equivalent grid inputs with the production final sidecar contract."""
+    for variable, (times, values) in data['source'].items():
+        full = np.full((len(times), *data['mask'].shape), io.FILL, dtype='f4')
+        full[:, data['yy'], data['xx']] = values
+        path = data['root']/'outputs/M/s'/variable/(variable+'_M_s_P.nc')
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with nc.Dataset(path, 'w') as ds:
+            for name, vals in [('time', times), ('lat', data['lat']), ('lon', data['lon'])]:
+                ds.createDimension(name, len(vals)); ds.createVariable(name, 'f8', (name,))[:] = vals
+            ds['time'].setncatts({'units': data['units'], 'calendar': data['calendar']})
+            v = ds.createVariable(variable, 'f4', ('time','lat','lon'), fill_value=io.FILL,
+                                  zlib=True, chunksizes=(120, 2, 2))
+            v[:] = full
+            v.units = {'tas':'K','rsds':'W/m2'}.get(variable,'m/s')
+            ds.patch_id = 'P'
+        side = {'kind':'global-final-patch','patch_id':'P','variable':variable,'output':str(path),
+                'time_count':len(times),'shape':list(full.shape),'land_point_count':int(data['mask'].sum())}
+        Path(str(path)+'.json').write_text(json.dumps(side))
+        mp = data['root']/'manifests'/f'M__s__{variable}__P.json'
+        m = io.read_json(mp); m['final_tasks'][0]['output'] = str(path); mp.write_text(json.dumps(m))
+
+
+@pytest.mark.parametrize('calendar,reverse', [('noleap',False),('proleptic_gregorian',True)])
+@pytest.mark.parametrize('tech', ['wind','solar'])
+@pytest.mark.parametrize('missing_kind', ['nc', 'sidecar'])
+def test_final_fallback_matches_blocks(tmp_path, calendar, reverse, tech, missing_kind):
+    data = build(tmp_path/'input', calendar=calendar, reverse=reverse)
+    publish_final_inputs(data)
+    a = arguments(data,tmp_path/'blocks',tech=tech)
+    block_manifest, block_ds = outputs(grid.compute(a))
+    assert block_manifest['provenance']['input_mode']=='blocks'
+    # Any missing required input switches the entire unit.
+    variable = io.VARS[tech][-1]
+    name = f'{variable}_0.nc' if missing_kind == 'nc' else f'block_{variable}_0.json'
+    (data['root']/f'blocks/M/s/{variable}/P'/name).unlink()
+    a.output_root=str(tmp_path/'final')
+    m, got = outputs(grid.compute(a))
+    assert m['provenance']['input_mode']=='final'
+    np.testing.assert_array_equal(got[tech+'_cf'],block_ds[tech+'_cf'])
+    with nc.Dataset(m['blocks'][0]['path']) as ds: assert ds.input_mode=='final'
+    assert all('/blocks/' not in e['path'] for e in m['provenance']['inputs'])
+    a.input_mode='blocks'
+    with pytest.raises(FileNotFoundError,match='missing BCSD block'):grid.compute(a)
+
+
+@pytest.mark.parametrize('tech', ['wind','solar'])
+def test_final_spawn_merge_and_streaming(tmp_path, tech):
+    data=build(tmp_path/'input',years=8)
+    publish_final_inputs(data)
+    a=arguments(data,tmp_path/'serial',tech=tech,input_mode='final',time_chunk=2000,merge_final=True)
+    _, serial=outputs(grid.compute(a))
+    a.output_root=str(tmp_path/'parallel');a.processes=8
+    m,parallel=outputs(grid.compute(a))
+    np.testing.assert_array_equal(parallel[tech+'_cf'],serial[tech+'_cf'])
+    with xr.open_dataset(m['final']['path']) as ds:np.testing.assert_array_equal(ds[tech+'_cf'],serial[tech+'_cf'])
+    stamps=[Path(b['path']).stat().st_mtime_ns for b in m['blocks']]
+    again=io.read_json(grid.compute(a))
+    assert all(b['reused'] for b in again['blocks'])
+    assert stamps==[Path(b['path']).stat().st_mtime_ns for b in again['blocks']]
+    plan=io.load_plan(a);reader=io.input_reader(plan,io.VARS[tech][0])
+    try:
+        reader.read(plan['blocks'][io.VARS[tech][0]][0]['numbers'][0:2],np.array([0]))
+        assert reader.read_bytes==2*4  # Two times, one cell; not the complete file.
+    finally:reader.close()
+
+
+@pytest.mark.parametrize('fault',['time','calendar','grid','units','sidecar','missing','coverage'])
+def test_final_rejects_invalid_inputs(tmp_path,fault):
+    data=build(tmp_path/'input');publish_final_inputs(data)
+    a=arguments(data,tmp_path/'out',tech='wind',input_mode='final')
+    p=data['root']/'outputs/M/s/uas/uas_M_s_P.nc'
+    if fault=='sidecar':
+        side=Path(str(p)+'.json');s=io.read_json(side);s['patch_id']='wrong';side.write_text(json.dumps(s))
+    elif fault=='missing':p.unlink()
+    else:
+        with nc.Dataset(p,'a') as ds:
+            if fault=='time':ds['time'][10]+=1
+            elif fault=='calendar':ds['time'].calendar='360_day'
+            elif fault=='grid':ds['lat'][:]=ds['lat'][:]+1
+            elif fault=='units':ds['uas'].units='K'
+            elif fault=='coverage':ds['time'][:]=ds['time'][:]+6
+    with pytest.raises((ValueError,FileNotFoundError,OSError)):grid.compute(a)
+
+
+def test_final_relocated_and_explicit_units(tmp_path):
+    data=build(tmp_path/'input');publish_final_inputs(data)
+    for variable in io.VARS['solar']:
+        mp=data['root']/'manifests'/f'M__s__{variable}__P.json';m=io.read_json(mp)
+        path=Path(m['final_tasks'][0]['output'])
+        m['final_tasks'][0]['output']=str(path).replace(str(data['root']),'/old/production_v1');mp.write_text(json.dumps(m))
+        side=Path(str(path)+'.json');s=io.read_json(side);s['output']=m['final_tasks'][0]['output'];side.write_text(json.dumps(s))
+        with nc.Dataset(path,'a') as ds:ds[variable].delncattr('units')
+    a=arguments(data,tmp_path/'out',input_mode='final',input_units=['uas=m/s','vas=m/s','tas=K','rsds=W/m2'])
+    _,got=outputs(grid.compute(a))
+    np.testing.assert_allclose(got.solar_cf,reference(data,'solar'),atol=1e-6,rtol=1e-6)
+
+
+def test_corrupt_existing_blocks_do_not_fallback(tmp_path):
+    data=build(tmp_path/'input');publish_final_inputs(data)
+    p=data['root']/'blocks/M/s/uas/P/block_uas_0.json';p.write_text('{broken')
+    with pytest.raises(ValueError):grid.compute(arguments(data,tmp_path/'out'))

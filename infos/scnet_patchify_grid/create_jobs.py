@@ -40,7 +40,9 @@ def parser():
     p.add_argument("--code-sha", required=True, help="Pinned full deployed Git SHA")
     p.add_argument("--patches", nargs="+", help="Optional local test subset; preparation omits this flag")
     p.add_argument("--partition", default="wzhctest")
-    p.add_argument("--resource-profile", default="cf_grid_v2_v1")
+    p.add_argument("--resource-profile", default="cf_grid_v2_v2")
+    p.add_argument("--input-inventory", default=str(HERE / "input_inventory.csv"),
+                   help="Frozen unit input classification from audit_inputs.py")
     p.add_argument("--cpus-per-task", type=int, default=10)
     p.add_argument("--processes", type=int, default=8)
     p.add_argument("--time", default="24:00:00")
@@ -56,10 +58,25 @@ def unit_id(model, scenario, tech, patch):
     return f"cf-grid-v2/{model}/{scenario}/{tech}/{patch}"
 
 
+def read_inventory(path):
+    with Path(path).open(encoding="utf-8", newline="") as f:
+        rows = list(csv.DictReader(f))
+    _, patches = catalog()
+    expected = {unit_id(*values) for values in itertools.product(MODELS, SCENARIOS, TECHS, patches)}
+    if len(rows) != len(expected) or {r["unit_id"] for r in rows} != expected:
+        raise ValueError("input inventory must cover exactly 1,128 unique units")
+    for r in rows:
+        if (r["unit_id"] != unit_id(r["model"], r["scenario"], r["tech"], r["patch"])
+                or r["input_mode"] not in ("blocks", "final") or r["files_ready"] != "True"):
+            raise ValueError(f"invalid/unready input inventory row: {r['unit_id']}")
+    return {r["unit_id"]: r for r in rows}
+
+
 def render(args, row, workers):
     command = ["python", "infos/scnet_patchify_grid/run_job.py", "--model", row["model"],
                "--scenario", row["scenario"], "--tech", row["tech"], "--patch", row["patch"],
                "--code-sha", args.code_sha, "--resource-profile", args.resource_profile,
+               "--input-mode", row["input_mode"], "--input-inventory-sha256", row["input_inventory_sha256"],
                "--processes", str(args.processes), "--tile-shape", *map(str, args.tile_shape),
                "--time-chunk", str(args.time_chunk), "--compress-level", str(args.compress_level)]
     if args.merge_final:
@@ -87,6 +104,8 @@ def render(args, row, workers):
 
 def build(args):
     workers, assignments = catalog()
+    inventory = read_inventory(args.input_inventory)
+    inventory_hash = hashlib.sha256(Path(args.input_inventory).read_bytes()).hexdigest()
     patches = args.patches if args.patches is not None else list(assignments)
     if not patches or len(set(patches)) != len(patches) or any(p not in assignments for p in patches):
         raise ValueError("invalid/duplicate patches")
@@ -109,12 +128,15 @@ def build(args):
                "script": name + ".sh", "logical_owner": assignments[patch]["username"],
                "submit_username": None, "resource_profile": args.resource_profile,
                "cpus": args.cpus_per_task, "processes": args.processes,
+               "input_mode": inventory[unit_id(model, scenario, tech, patch)]["input_mode"],
+               "input_inventory_sha256": inventory_hash,
                "merge_final": args.merge_final, "external_bc_variables": ["uas", "vas"] if tech == "wind" else ["rsds", "tas", "uas", "vas"],
                "expected_manifest": f"outputs/{model}/{scenario}/{patch}/{tech}/manifest.json"}
         script = render(args, row, workers)
         row["script_sha256"] = hashlib.sha256(script.encode()).hexdigest()
         scripts[row["script"]] = script; jobs.append(row)
-    manifest = {"schema": "cf-grid-v2-job-pack-v1", "code_sha": args.code_sha,
+    manifest = {"schema": "cf-grid-v2-job-pack-v2", "code_sha": args.code_sha,
+                "input_inventory_sha256": inventory_hash,
                 "resource_profile": args.resource_profile, "models": list(MODELS),
                 "scenarios": list(SCENARIOS), "techs": list(TECHS), "patches": patches,
                 "workers": workers, "aggregator": "acjpoxgsdu", "count": len(jobs),

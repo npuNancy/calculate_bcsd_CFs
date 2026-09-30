@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compute native-grid CF from BCSD year blocks; optionally merge the results."""
+"""Compute native-grid CF from BCSD blocks or final files in year segments."""
 from __future__ import annotations
 
 import argparse
@@ -39,6 +39,8 @@ def parser():
     p.add_argument("--tech", choices=tuple(io.VARS), required=True)
     p.add_argument("--years", default="2015-2060", help="Complete year range in the BCSD manifest")
     p.add_argument("--processes", type=positive, default=8)
+    p.add_argument("--input-mode", choices=("auto", "blocks", "final"), default="auto",
+                   help="Prefer complete blocks; otherwise read final files for the whole unit")
     p.add_argument("--time-chunk", type=positive, default=240)
     p.add_argument("--tile-shape", nargs=2, type=positive, default=[64, 64], metavar=("NY", "NX"))
     p.add_argument("--compress-level", type=int, choices=range(10), default=2)
@@ -53,7 +55,7 @@ def parser():
 def implementation_identity(tech):
     root = Path(__file__).resolve().parent
     files = {name: io.file_identity(root/name, True)["sha256"]
-             for name in ("patchify_grid_cf.py", "grid_cf_io.py", "cf_physics.py")}
+             for name in ("patchify_grid_cf.py", "grid_cf_io.py", "grid_cf_sources.py", "cf_physics.py")}
     try:
         sha = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, stderr=subprocess.DEVNULL).decode().strip()
     except (OSError, subprocess.CalledProcessError):
@@ -98,7 +100,7 @@ def _compute_block(payload):
         begin = time.monotonic()
         try:
             with ExitStack() as stack:
-                readers = {v: io.BlockReader(plan["blocks"][v], v) for v in io.VARS[args.tech]}
+                readers = {v: io.input_reader(plan, v) for v in io.VARS[args.tech]}
                 for reader in readers.values():
                     stack.callback(reader.close)
                 ds = stack.enter_context(io.create_output(tmp, plan, axis, args, identity))
@@ -222,7 +224,8 @@ def compute(args):
         provenance = {"implementation": implementation_identity(args.tech), "inputs": plan["inputs"],
                       "grid_fingerprint": plan["grid_fingerprint"], "years": args.years,
                       "model": args.model, "scenario": args.scenario, "patch": args.patch, "tech": args.tech,
-                      "schema": 1, "tile_shape": list(args.tile_shape), "time_chunk": args.time_chunk,
+                      "schema": 2, "input_mode": plan["input_mode"],
+                      "tile_shape": list(args.tile_shape), "time_chunk": args.time_chunk,
                       "compress_level": args.compress_level, "input_units": args.input_units,
                       "time_axes": {v: [{"sha256": io.array_digest(e["raw"]), "units": e["units"],
                                          "calendar": e["calendar"], "unit_scale": e["scale"],
