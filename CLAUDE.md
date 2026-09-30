@@ -1,14 +1,17 @@
 # CLAUDE.md
 
-本仓库只维护 global_bcsd patchify 场站 CF 入口。每个作业是
-`model × scenario × patch × tech`，入口为 `patchify_station_cf.py`，物理核为
-`cf_physics.py`；禁止恢复已删除的旧批处理入口或网格输出。
+全格点入口为 `patchify_grid_cf.py`，输入校验及网格读写位于 `grid_cf_io.py`；
+原场站入口 `patchify_station_cf.py` 保留。共用物理核为 `cf_physics.py`。
+使用仓库 `.venv/bin/python`，不改变风光物理公式。
 
-使用仓库 `.venv/bin/python`。BCSD 最终文件必须有 sidecar，且 patch_id/variable 与命令参数一致。
-输出为 station-only NetCDF，临时文件原子替换；作业生成器位于 `scnet/create_cf_patch_jobs.py`，只生成脚本、不提交。
+一个 grid unit 为 model × scenario × patch × tech。只读取当前 BCSD 根下的年份 blocks，
+通过 manifest、sidecar 和 land plan 验证身份；缺失单位须用显式参数声明。
+默认8个年份 worker，每个 worker 内按时间和空间分块写 `(time, lat, lon)` NetCDF；
+`--merge-final` 默认 False。缺测与零出力分开，年份文件持久保存。
+
+输入、源码和配置身份决定恢复，进程数与合并开关不改变年份身份。
+发布采用临时文件原子替换，unit/文件锁防止并发覆盖。
+本阶段只实现计算和本地验证，不建设 infos/scnet_patchify_grid/ 或修改超算生成器。
 
 太阳能采用 Erbs 双轴跟踪和温度修正；风电采用 GE120/2500、100 m、1/7 幂律和 25 m/s 切出。
-所有输出和 SCNet 运行态目录由 `.gitignore` 忽略。
-
 每次回复用户称呼“小凯”，结尾使用“希望对你有帮助，小凯！”。
-
