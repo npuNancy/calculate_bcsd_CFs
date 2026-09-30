@@ -13,3 +13,4 @@ __pycache__/
 .vscode/
 .claude/
 tmp/
+/infos/scnet_patchify_grid/completion_status/

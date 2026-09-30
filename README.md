@@ -77,6 +77,10 @@ sidecar记录各阶段耗时、读取数组字节数及进程峰值RSS。读取�
 
 ## 验证和场站入口
 
+全格点超算部署、ACL共享、14账号分工及15分钟监控见
+[SCNet运行包](infos/scnet_patchify_grid/README.md)。生成器默认覆盖四模型的全部1,128个unit，
+每个计算账号都预生成完整作业包，结果直接写乌镇1872的home共享目录。
+
 ```bash
 .venv/bin/python -m pytest tests/ -q
 ```
