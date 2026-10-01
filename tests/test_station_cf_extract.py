@@ -96,7 +96,8 @@ def test_solar_empty_unit_and_direct_oracle(tmp_path):
                 assert dst['time'][0]%3==1.5
                 for i,(y,x) in enumerate(zip(dst['source_iy'][:],dst['source_ix'][:])):
                     np.testing.assert_array_equal(dst['solar_cf'][:,i],src['solar_cf'][:,int(y),int(x)])
-    index=read_json(publish(prepared))
+    index=read_json(publish(prepared,processes=1))
+    assert read_json(publish(prepared,processes=2))==index
     assert index['summary']['empty_units']==1 and index['summary']['year_nc_files']==2
 
 
@@ -135,3 +136,20 @@ def test_cross_patch_time_mismatch(tmp_path):
         with nc.Dataset(p,'a') as ds:ds['time'][:]=ds['time'][:]+1
         side=read_json(p+'.json');side['file']=file_identity(p);atomic_json(p+'.json',side)
     with pytest.raises(ValueError,match='cross-patch time'):prepare(cfg,tmp_path/'out',sample=True)
+
+
+def test_parallel_publish_failure_preserves_index(tmp_path):
+    cfg=build(tmp_path,stations=('ssp585',));prepared=prepare(cfg,tmp_path/'out',sample=True)
+    prep=read_json(prepared)
+    for t in prep['tasks']:
+        extract_unit(prepared,model='M',climate_scenario='ssp126',station_scenario='ssp585',
+                     tech=t['tech'],patch=t['source_patch'],processes=1)
+    path=publish(prepared,processes=2);before=path.read_bytes()
+    entry=read_json(path)['entries'][0]
+    sidecar=Path(entry['blocks'][0]['sidecar']['path'])
+    side=read_json(sidecar);side['identity']='corrupt';atomic_json(sidecar,side)
+    with pytest.raises(ValueError,match='incomplete year output'):
+        publish(prepared,processes=2)
+    assert path.read_bytes()==before
+    with pytest.raises(ValueError,match='positive'):
+        publish(prepared,processes=0)

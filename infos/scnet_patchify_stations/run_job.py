@@ -124,8 +124,8 @@ def preflight(args):
         raise ValueError('executed script hash/stage differs from pack')
     if int(env('SLURM_CPUS_PER_TASK')) < row['cpus']:
         raise ValueError('Slurm CPU allocation below prepared resource profile')
-    if args.stage == 'prepare' and args.processes != row['processes']:
-        raise ValueError('prepare processes differ from pack')
+    if args.stage in ('prepare', 'publish') and args.processes != row['processes']:
+        raise ValueError('stage processes differ from pack')
     if args.stage == 'extract':
         for key in ('model','climate_scenario','station_scenario','tech','patch','processes','time_chunk','station_chunk','compress_level'):
             if getattr(args,key) != row[key]:
@@ -138,7 +138,8 @@ def preflight(args):
         prepared_hash = sha(prepared)
         if prepared_hash != env('SCF_PREPARED_SHA256'):
             raise ValueError('prepared file changed')
-        prep = prepared_contract(prepared, shared, head)
+        prepared_code = release.get('prepared_code_sha', head) if args.stage == 'publish' else head
+        prep = prepared_contract(prepared, shared, prepared_code)
         if prep['config_hash'] != digest(read(config_path)):
             raise ValueError('prepared configuration differs from frozen campaign config')
     return {'user': user, 'job_id': job_id, 'run_id': run_id, 'unit_id': uid, 'shared': shared,
@@ -200,7 +201,7 @@ def execute(args, runtime):
         path = extract_unit(runtime['prepared'], **values)
         return extract_evidence(path,args,runtime)
     from extract_station_cf import publish
-    path = publish(runtime['prepared']); index = read(path); summary = index['summary']
+    path = publish(runtime['prepared'], processes=args.processes); index = read(path); summary = index['summary']
     if (index['status'] != 'COMPLETED' or summary['scope'] != 'production' or summary['units'] != 3384
             or summary['nonempty_units']+summary['empty_units'] != 3384
             or summary['year_nc_files'] != 8*summary['nonempty_units']):

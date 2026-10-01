@@ -53,6 +53,7 @@ def parser():
     p.add_argument('--prepare-cpus', type=int, default=16)
     p.add_argument('--prepare-processes', type=int, default=16)
     p.add_argument('--publish-cpus', type=int, default=10)
+    p.add_argument('--publish-processes', type=int, default=8)
     p.add_argument('--processes', type=int, default=8)
     p.add_argument('--time', default='24:00:00')
     p.add_argument('--time-chunk', type=int, default=240)
@@ -68,6 +69,8 @@ def render(args, row, workers):
                '--resource-profile', args.resource_profile]
     if row['stage'] == 'prepare':
         command.extend(['--processes', str(args.prepare_processes)])
+    if row['stage'] == 'publish':
+        command.extend(['--processes', str(args.publish_processes)])
     if row['stage'] == 'extract':
         for key in ('model', 'climate_scenario', 'station_scenario', 'tech', 'patch'):
             command.extend(['--'+key.replace('_', '-'), row[key]])
@@ -101,6 +104,7 @@ def build(args):
         if not re.fullmatch('[A-Za-z0-9][A-Za-z0-9_.-]*', getattr(args, key)):
             raise ValueError('unsafe '+key)
     if (not 1 <= args.prepare_processes <= min(16, args.prepare_cpus)
+            or not 1 <= args.publish_processes <= args.publish_cpus
             or not 1 <= args.processes <= min(8, args.cpus_per_task) or min(args.prepare_cpus, args.publish_cpus) < 1
             or min(args.time_chunk, args.station_chunk) < 1):
         raise ValueError('invalid CPU/process/chunk configuration')
@@ -120,7 +124,7 @@ def build(args):
                      'years': '2015-2060', 'depends_on': ['station-cf-v1/prepare'],
                      'expected_manifest': f'outputs/{m}/climate_{c}/station_{s}/{patch}/{t}/manifest.json'})
     rows.append({'stage': 'publish', 'unit_id': 'station-cf-v1/publish', 'job_name': 'stcf_publish',
-                 'logical_owner': workers[0], 'cpus': args.publish_cpus, 'processes': 1,
+                 'logical_owner': workers[0], 'cpus': args.publish_cpus, 'processes': args.publish_processes,
                  'expected_manifest': 'index/authoritative_index.json', 'depends_on': 'all_extract_succeeded'})
     scripts = {}
     for row in rows:

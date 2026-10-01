@@ -117,49 +117,81 @@ def extract_unit(prepared, *, model, climate_scenario, station_scenario, tech, p
     return manifest
 
 
-def publish(prepared):
-    """Serial complete-scope audit and index publication; no task execution."""
+def _publish_group(payload):
+    prep, tasks = payload
+    entries = []; cached_mapping_key = None; cached_mapping_frame = None
+    for base in tasks:
+        task = task_context(prep, base, verify_catalog=False)
+        io.check_source(task['source'])
+        if cached_mapping_key != base['mapping_key']:
+            if sha(task['mapping']['path']) != task['mapping']['sha256']:
+                raise ValueError('mapping changed')
+            cached_mapping_frame = read_mapping(task['mapping']['path'])
+            cached_mapping_key = base['mapping_key']
+        directory = unit_directory(prep, task); path = directory/'manifest.json'
+        if not path.exists():
+            raise ValueError(f'incomplete unit: {base["unit_id"]}')
+        state = read_json(path)
+        expected = unit_identity(task, state['profile'], prep['implementation'])
+        if state['identity'] != expected or state['prepared_identity'] != prep['identity']:
+            raise ValueError('unit manifest identity mismatch')
+        frame = io.sort_mapping(io.selected_mapping(task, cached_mapping_frame), task['source']['blocks'][0]['path'], task['tech'])
+        if len(frame) != base['station_count'] or state['station_count'] != len(frame):
+            raise ValueError('station count mismatch')
+        if len(frame):
+            if state['status'] != 'COMPLETED' or len(state['blocks']) != len(task['source']['blocks']):
+                raise ValueError(f'incomplete unit: {base["unit_id"]}')
+            for b, row in zip(task['source']['blocks'], state['blocks']):
+                if row['index'] != b['index'] or not io.completed(row['path'], task, b, frame, io.block_id(expected, b)):
+                    raise ValueError('incomplete year output')
+                io.validate_station(row['path'], task, b, frame, io.block_id(expected, b), sample=True)
+        elif state['status'] != 'EMPTY_NO_STATIONS' or state['blocks']:
+            raise ValueError('invalid empty unit')
+        audit = read_json(directory/'audit.json')
+        if audit['status'] != state['status'] or audit['identity'] != expected:
+            raise ValueError('missing unit audit')
+        valid_count = sum(read_json(str(r['path'])+'.json')['valid_count'] for r in state['blocks'])
+        missing_count = sum(read_json(str(r['path'])+'.json')['missing_count'] for r in state['blocks'])
+        entries.append({**base, 'valid_count': valid_count, 'missing_count': missing_count, 'manifest': io.hashed_file(path), 'status': state['status'],
+                        'blocks': [{**r, 'file': io.file_identity(r['path']),
+                                    'sidecar': io.hashed_file(str(r['path'])+'.json')} for r in state['blocks']]})
+    return entries
+
+
+def publish(prepared, *, processes=8):
+    """Audit units in worker processes, then publish the complete index."""
     import pandas as pd
+    if processes < 1:
+        raise ValueError('publish processes must be positive')
     prep = io.load_prepared(prepared); root = Path(prep['output_root'])
     with output_lock(root/'.publish.lock'):
         entries, coverage, unmapped = [], [], []
-        checked_catalogs = set(); cached_mapping_key = None; cached_mapping_frame = None
+        checked_catalogs = set(); groups = {}
         for base in prep['tasks']:
-            task = task_context(prep, base, verify_catalog=base['station_scenario'] not in checked_catalogs)
-            checked_catalogs.add(base['station_scenario'])
-            io.check_source(task['source'])
-            if cached_mapping_key != base['mapping_key']:
-                if sha(task['mapping']['path']) != task['mapping']['sha256']:
-                    raise ValueError('mapping changed')
-                cached_mapping_frame = read_mapping(task['mapping']['path'])
-                cached_mapping_key = base['mapping_key']
-            directory = unit_directory(prep, task); path = directory/'manifest.json'
-            if not path.exists():
-                raise ValueError(f'incomplete unit: {base["unit_id"]}')
-            state = read_json(path)
-            expected = unit_identity(task, state['profile'], prep['implementation'])
-            if state['identity'] != expected or state['prepared_identity'] != prep['identity']:
-                raise ValueError('unit manifest identity mismatch')
-            frame = io.sort_mapping(io.selected_mapping(task, cached_mapping_frame), task['source']['blocks'][0]['path'], task['tech'])
-            if len(frame) != base['station_count'] or state['station_count'] != len(frame):
-                raise ValueError('station count mismatch')
-            if len(frame):
-                if state['status'] != 'COMPLETED' or len(state['blocks']) != len(task['source']['blocks']):
-                    raise ValueError(f'incomplete unit: {base["unit_id"]}')
-                for b, row in zip(task['source']['blocks'], state['blocks']):
-                    if row['index'] != b['index'] or not io.completed(row['path'], task, b, frame, io.block_id(expected, b)):
-                        raise ValueError('incomplete year output')
-                    io.validate_station(row['path'], task, b, frame, io.block_id(expected, b), sample=True)
-            elif state['status'] != 'EMPTY_NO_STATIONS' or state['blocks']:
-                raise ValueError('invalid empty unit')
-            audit = read_json(directory/'audit.json')
-            if audit['status'] != state['status'] or audit['identity'] != expected:
-                raise ValueError('missing unit audit')
-            valid_count = sum(read_json(str(r['path'])+'.json')['valid_count'] for r in state['blocks'])
-            missing_count = sum(read_json(str(r['path'])+'.json')['missing_count'] for r in state['blocks'])
-            entries.append({**base, 'valid_count': valid_count, 'missing_count': missing_count, 'manifest': io.hashed_file(path), 'status': state['status'],
-                            'blocks': [{**r, 'file': io.file_identity(r['path']),
-                                        'sidecar': io.hashed_file(str(r['path'])+'.json')} for r in state['blocks']]})
+            if base['station_scenario'] not in checked_catalogs:
+                task_context(prep, base)
+                checked_catalogs.add(base['station_scenario'])
+            groups.setdefault(base['mapping_key'], []).append(base)
+        payloads = [(prep, tasks) for tasks in groups.values()]
+        if processes == 1:
+            for payload in payloads:
+                entries.extend(_publish_group(payload))
+        else:
+            for name in ('OMP_NUM_THREADS', 'OPENBLAS_NUM_THREADS', 'MKL_NUM_THREADS', 'NUMEXPR_NUM_THREADS'):
+                os.environ[name] = '1'
+            with ProcessPoolExecutor(max_workers=min(processes, len(payloads)),
+                                     mp_context=multiprocessing.get_context('spawn')) as pool:
+                futures = [pool.submit(_publish_group, payload) for payload in payloads]
+                try:
+                    for future in as_completed(futures):
+                        entries.extend(future.result())
+                        print(f'Publish audited {len(entries)}/{len(prep["tasks"])} units', flush=True)
+                except BaseException:
+                    for future in futures:
+                        future.cancel()
+                    raise
+        by_unit = {entry['unit_id']: entry for entry in entries}
+        entries = [by_unit[task['unit_id']] for task in prep['tasks']]
         seen = set()
         for t in prep['tasks']:
             key = (t['model'], t['climate_scenario'], t['station_scenario'], t['tech'])
@@ -210,7 +242,7 @@ def main():
     if publication:
         if any(args[k] for k in ('model','climate_scenario','station_scenario','tech','patch')):
             parser.error('--publish cannot be combined with unit selectors')
-        print(publish(args['prepared']))
+        print(publish(args['prepared'], processes=args['processes']))
     else:
         if any(not args[k] for k in ('model','climate_scenario','station_scenario','tech','patch')):
             parser.error('both scenarios, model, tech and patch are required')

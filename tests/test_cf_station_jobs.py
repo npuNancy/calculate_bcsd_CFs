@@ -41,6 +41,8 @@ def test_full_scope_and_dependencies(tmp_path):
     assert rows[0]['stage'] == 'prepare' and rows[-1]['stage'] == 'publish'
     assert all(r['depends_on'] == ['station-cf-v1/prepare'] for r in extracts)
     assert rows[-1]['depends_on'] == 'all_extract_succeeded'
+    assert rows[-1]['processes'] == 8
+    assert '--processes 8' in scripts[rows[-1]['script']]
     assert all(r['submit_username'] is None for r in rows)
 
 
@@ -71,7 +73,7 @@ def test_all_worker_packs_identical_and_shell_valid(tmp_path):
 
 
 @pytest.mark.parametrize('extra', [('--processes', '11'), ('--cpus-per-task', '0'),
-                                    ('--prepare-cpus', '0'), ('--prepare-processes', '17'), ('--time', '00:00:00'),
+                                    ('--publish-processes', '11'), ('--publish-processes', '0'), ('--prepare-cpus', '0'), ('--prepare-processes', '17'), ('--time', '00:00:00'),
                                     ('--partition', 'x\n#SBATCH --nodes=9'),
                                     ('--resource-profile', '../bad'), ('--station-chunk', '0')])
 def test_bad_resources_rejected(tmp_path, extra):
@@ -213,6 +215,27 @@ def test_preflight_release_and_script_binding(tmp_path, monkeypatch):
     args = runner.parser().parse_args(['--stage','prepare','--code-sha',SHA,
                                       '--config-sha256',config_sha,'--resource-profile','station_cf_v1','--processes','16'])
     assert runner.preflight(args)['job_id'] == '123'
+    publish_args = runner.parser().parse_args(['--stage','publish','--code-sha',SHA,
+                    '--config-sha256',config_sha,'--resource-profile','station_cf_v1','--processes','8'])
+    manifest = runner.read(pack)
+    tasks = [dict(unit_id=r['unit_id'],model=r['model'],climate_scenario=r['climate_scenario'],
+                  station_scenario=r['station_scenario'],tech=r['tech'],source_patch=r['patch'],years=r['years'])
+             for r in manifest['jobs'] if r['stage']=='extract']
+    prior_sha = 'c'*40
+    prep = dict(sample=False,output_root=str(shared),implementation={'code_sha':prior_sha},
+                capacity_semantics='snapshot_total',tasks=tasks,config_hash=runner.digest(runner.read(config)))
+    prep['identity']=runner.digest(prep);prepared=write(shared/'prepared.json',prep)
+    monkeypatch.setenv('SCF_PREPARED_SHA256',runner.sha(prepared))
+    monkeypatch.setenv('SCF_JOB_SCRIPT',str(tmp_path/'pack/stcf_publish.sh'))
+    with pytest.raises(ValueError,match='prepared production identity'):
+        runner.preflight(publish_args)
+    release_data=runner.read(release);release_data['prepared_code_sha']=prior_sha;write(release,release_data)
+    monkeypatch.setenv('SCF_RELEASE_SHA256',runner.sha(release))
+    assert runner.preflight(publish_args)['prepared_hash']==runner.sha(prepared)
+    publish_args.processes=1
+    with pytest.raises(ValueError,match='stage processes'):
+        runner.preflight(publish_args)
+    monkeypatch.setenv('SCF_JOB_SCRIPT',environment['SCF_JOB_SCRIPT'])
     script = Path(environment['SCF_JOB_SCRIPT']); original=script.read_text()
     script.write_text(original+'# changed\n')
     with pytest.raises(ValueError,match='script hash'):
