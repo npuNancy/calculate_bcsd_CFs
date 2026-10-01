@@ -239,3 +239,14 @@ def test_receipt_bound_to_job_and_not_overwritten(tmp_path, monkeypatch):
     assert value['status']=='COMPLETED' and value['prepared_sha256']==runner.sha(prepared)
     with pytest.raises(ValueError,match='already exists'):
         runner.main(args)
+
+
+def test_script_identity_with_unset_bash_source(tmp_path):
+    manifest, scripts = jobs.build(options(tmp_path))
+    text = scripts[manifest['jobs'][0]['script']]
+    assert 'BASH_SOURCE' not in text
+    assignment = next(line for line in text.splitlines() if line.startswith('SCF_JOB_SCRIPT='))
+    script = tmp_path/'slurm_script'
+    script.write_text('set -eu\n'+assignment+'\nprintf "%s\\n" "$SCF_JOB_SCRIPT"\n')
+    result = subprocess.run(['bash','-c',script.read_text(),str(script)],capture_output=True,text=True,check=True)
+    assert result.stdout.strip()==str(script.resolve())

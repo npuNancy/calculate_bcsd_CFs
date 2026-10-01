@@ -84,7 +84,7 @@ def render(args, row, workers):
         '  *) echo "Not an authorized station-CF worker: $run_user" >&2; exit 2 ;;', 'esac',
         ': "${SLURM_JOB_ID:?requires a Slurm compute job}"',
         ': "${SCF_REPO:?set SCF_REPO}"',
-        'export SCF_JOB_SCRIPT="$(realpath "${BASH_SOURCE[0]}")"',
+        'SCF_JOB_SCRIPT="$(realpath -- "$0")"', 'export SCF_JOB_SCRIPT',
         'export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1',
         'cd "$SCF_REPO"', shlex.join(command), '',
     ])
