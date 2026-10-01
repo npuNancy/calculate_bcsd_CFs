@@ -3,6 +3,11 @@ from __future__ import annotations
 
 import argparse
 import itertools
+import json
+import time
+from concurrent.futures import ProcessPoolExecutor
+from contextlib import nullcontext
+from multiprocessing import get_context
 from pathlib import Path
 
 from grid_cf_io import atomic_json, digest, output_lock, read_json
@@ -64,7 +69,59 @@ def enumerate_tasks(config, patches):
                                                   config['station_scenarios'], config['techs'], sorted(patches))]
 
 
-def prepare(config_path, output_root, *, sample=False):
+_TIME_CACHE = {}
+
+
+def _scan_request(request):
+    path, kwargs = request
+    return io.scan_source(path, **kwargs, time_cache=_TIME_CACHE)
+
+
+def _progress(stage, completed, total, started):
+    elapsed = time.monotonic() - started
+    print(json.dumps({'stage': stage, 'completed': completed, 'total': total,
+                      'elapsed_seconds': round(elapsed, 2),
+                      'remaining_estimate_seconds': round(elapsed * (total-completed) / completed, 2)
+                      if completed else None}), flush=True)
+
+
+def scan_sources(config, grid_root, patches, release, *, sample, processes):
+    sources, groups, time_contracts = {}, {}, {}
+    total = len(config['models'])*len(config['climate_scenarios'])*len(config['techs'])*len(patches)
+    started = time.monotonic()
+    executor = (ProcessPoolExecutor(max_workers=processes, mp_context=get_context('spawn'))
+                if processes > 1 else nullcontext(None))
+    with executor as pool:
+        for m, c, t in itertools.product(config['models'], config['climate_scenarios'], config['techs']):
+            grids = {}
+            ordered = sorted(patches)
+            requests = [(grid_root/'outputs'/m/c/p/t/'manifest.json',
+                         dict(model=m, climate_scenario=c, tech=t, patch=p, years=config['years'],
+                              expected_blocks=None if sample else 8)) for p in ordered]
+            results = pool.map(_scan_request, requests, chunksize=1) if pool else map(_scan_request, requests)
+            for p, (source, grid) in zip(ordered, results):
+                if not sample:
+                    provenance = read_json(source['manifest'])['provenance']
+                    if provenance['implementation']['code_sha'] != release['code_sha']:
+                        raise ValueError('source code SHA differs from frozen release')
+                sources[source_key(m, c, t, p)] = source; grids[p] = grid
+                times = [b['time'] for b in source['blocks']]
+                key = '/'.join((m, c, t))
+                if key in time_contracts and time_contracts[key] != times:
+                    raise ValueError('cross-patch time contract mismatch')
+                time_contracts[key] = times
+                if len(sources) == 1 or len(sources) % len(patches) == 0:
+                    _progress('source_index', len(sources), total, started)
+            fingerprint = digest(grid_fingerprints(grids))
+            groups.setdefault(fingerprint, grids)
+            for p in patches:
+                sources[source_key(m, c, t, p)]['spatial_group'] = fingerprint
+    return sources, groups
+
+
+def prepare(config_path, output_root, *, sample=False, processes=1):
+    if not 1 <= processes <= 16:
+        raise ValueError("prepare processes must be between 1 and 16")
     config_path = Path(config_path).resolve(); root = Path(output_root).resolve()
     raw = read_json(config_path); grid_root = io.resolve(raw['grid_cf_root'], config_path.parent)
     if root == grid_root or root.is_relative_to(grid_root) or grid_root.is_relative_to(root):
@@ -103,39 +160,21 @@ def prepare(config_path, output_root, *, sample=False):
             raise ValueError('grid CF production scope incomplete')
         if not sample and sha(patch_path) != release['patch_manifest']['sha256']:
             raise ValueError('source patch manifest changed from release')
-        sources, groups, time_contracts = {}, {}, {}
         assets = [io.hashed_file(config_path), io.hashed_file(patch_path), io.hashed_file(release_path),
                   io.hashed_file(grid_root/'runtime/completion.json')]
-        for m, c, t in itertools.product(config['models'], config['climate_scenarios'], config['techs']):
-            grids = {}
-            for p in sorted(patches):
-                source, grid = io.scan_source(grid_root/'outputs'/m/c/p/t/'manifest.json', model=m,
-                                             climate_scenario=c, tech=t, patch=p, years=config['years'],
-                                             expected_blocks=None if sample else 8)
-                if not sample:
-                    provenance = read_json(source['manifest'])['provenance']
-                    if provenance['implementation']['code_sha'] != release['code_sha']:
-                        raise ValueError('source code SHA differs from frozen release')
-                sources[source_key(m, c, t, p)] = source; grids[p] = grid
-                times = [b['time'] for b in source['blocks']]
-                key = '/'.join((m, c, t))
-                if key in time_contracts and time_contracts[key] != times:
-                    raise ValueError('cross-patch time contract mismatch')
-                time_contracts[key] = times
-            fingerprint = digest(grid_fingerprints(grids))
-            groups.setdefault(fingerprint, grids)
-            for p in patches:
-                sources[source_key(m, c, t, p)]['spatial_group'] = fingerprint
-        catalogs = {}
+        sources, groups = scan_sources(config, grid_root, patches, release, sample=sample, processes=processes)
+        catalogs = {}; stage_started = time.monotonic()
         station_root = io.resolve(config['stations_root'], config_path.parent)
         for s in config['station_scenarios']:
             catalogs[s] = build_catalog(io.resolve(config['station_files'][s], station_root), s, root,
                                         reference_csv=io.resolve(config['station_reference_files'][s], config_path.parent))
-        mappings = {}
+            _progress('catalogs', len(catalogs), len(config['station_scenarios']), stage_started)
+        mappings = {}; stage_started = time.monotonic()
         for fingerprint, grids in groups.items():
             for s, t in itertools.product(config['station_scenarios'], config['techs']):
                 mappings[f'{fingerprint}/{s}/{t}'] = build_mapping(
                     catalogs[s], t, grids, patches, root, config.get('max_distance_deg', 0.15))
+                _progress('mappings', len(mappings), len(groups)*len(config['station_scenarios'])*len(config['techs']), stage_started)
         tasks = enumerate_tasks(config, patches)
         for task in tasks:
             group = sources[task['source_key']]['spatial_group']
@@ -169,8 +208,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', required=True); parser.add_argument('--output-root', required=True)
     parser.add_argument('--sample', action='store_true', help='explicit small-fixture scope; never a full production release')
+    parser.add_argument("--processes", type=int, default=16, help="parallel source-index workers (1-16)")
     args = parser.parse_args()
-    print(prepare(args.config, args.output_root, sample=args.sample))
+    print(prepare(args.config, args.output_root, sample=args.sample, processes=args.processes))
 
 
 if __name__ == '__main__':

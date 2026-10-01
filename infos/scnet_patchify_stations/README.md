@@ -26,7 +26,7 @@ BCSD 已抽检通过；不执行 BCSD 全量检查、不读取天气重新计算
 
 | 阶段 | 科学入口 | 逻辑作业数 | 依赖 | 完成证据 |
 |---|---|---:|---|---|
-| prepare | `prepare_station_cf.prepare(config, shared_root)` | 1 | 输入配置、ACL、代码、全包及启动空间检查通过 | 生产 prepared、catalog/mapping/任务表、prepare receipt + Slurm 成功 |
+| prepare | `prepare_station_cf.prepare(config, shared_root, processes=16)` | 1 | 输入配置、ACL、代码、全包及启动空间检查通过 | 生产 prepared、catalog/mapping/任务表、prepare receipt + Slurm 成功 |
 | extract | `extract_station_cf.extract_unit(...)` | 3,384 | prepare 验收、资产只读冻结、空间复核通过 | 每 unit 八段和 audit，或合法 EMPTY_NO_STATIONS；receipt + Slurm 成功 |
 | publish | `extract_station_cf.publish(prepared)` | 1 | 所有 extract 已验收成功或合法空任务 | 全局索引、覆盖/审核报告、publish receipt + Slurm 成功 |
 
@@ -46,7 +46,7 @@ python3 infos/scnet_patchify_stations/create_jobs.py \
   --dry-run
 ```
 
-实际生成去掉 `--dry-run`，在全部 14 worker 各执行一次。默认 wzhctest、每阶段 10 CPU、24 小时；extract 内 8 个 spawn worker、time chunk 240、station chunk 1024、压缩 2。prepare/publish 单进程，CPU 数用于满足内存需求；实际分区计费/内存规则仍需核实。
+实际生成去掉 `--dry-run`，在全部 14 worker 各执行一次。默认 wzhctest、prepare 16 CPU，extract/publish 10 CPU，均为24小时；extract 内 8 个 spawn worker、time chunk 240、station chunk 1024、压缩 2。prepare 默认 16 个 spawn 进程建立源索引（`--prepare-processes` 可调），目录和 mapping 顺序生成；publish 单进程，CPU 数也用于满足内存需求；实际分区计费/内存规则仍需核实。
 
 脚本通过 `SCF_ENV_FILE` 读取账号环境，使用 `source "$SCF_CLIMATE_ACTIVATE" climate` 激活环境。路径、计费账号均不写入 `#SBATCH`；日志是相对 `logs/%x-%j.*`，控制器在提交前创建 logs，并显式传 `--account=<实际worker用户名>`、`--chdir=<worker work root>` 和 `--export=ALL`。
 

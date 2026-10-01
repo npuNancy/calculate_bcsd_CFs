@@ -50,7 +50,8 @@ def parser():
     p.add_argument('--resource-profile', default='station_cf_v1')
     p.add_argument('--partition', default='wzhctest')
     p.add_argument('--cpus-per-task', type=int, default=10)
-    p.add_argument('--prepare-cpus', type=int, default=10)
+    p.add_argument('--prepare-cpus', type=int, default=16)
+    p.add_argument('--prepare-processes', type=int, default=16)
     p.add_argument('--publish-cpus', type=int, default=10)
     p.add_argument('--processes', type=int, default=8)
     p.add_argument('--time', default='24:00:00')
@@ -65,6 +66,8 @@ def render(args, row, workers):
     command = ['python', 'infos/scnet_patchify_stations/run_job.py', '--stage', row['stage'],
                '--code-sha', args.code_sha, '--config-sha256', args.config_sha256,
                '--resource-profile', args.resource_profile]
+    if row['stage'] == 'prepare':
+        command.extend(['--processes', str(args.prepare_processes)])
     if row['stage'] == 'extract':
         for key in ('model', 'climate_scenario', 'station_scenario', 'tech', 'patch'):
             command.extend(['--'+key.replace('_', '-'), row[key]])
@@ -97,14 +100,15 @@ def build(args):
     for key in ('resource_profile', 'partition'):
         if not re.fullmatch('[A-Za-z0-9][A-Za-z0-9_.-]*', getattr(args, key)):
             raise ValueError('unsafe '+key)
-    if (not 1 <= args.processes <= min(8, args.cpus_per_task) or min(args.prepare_cpus, args.publish_cpus) < 1
+    if (not 1 <= args.prepare_processes <= min(16, args.prepare_cpus)
+            or not 1 <= args.processes <= min(8, args.cpus_per_task) or min(args.prepare_cpus, args.publish_cpus) < 1
             or min(args.time_chunk, args.station_chunk) < 1):
         raise ValueError('invalid CPU/process/chunk configuration')
     if not re.fullmatch(r'(?:\d+-)?\d{2,3}:[0-5]\d:[0-5]\d', args.time) or not any(int(x) for x in re.split('[-:]', args.time)):
         raise ValueError('invalid walltime')
     patches = sorted(assignments, key=lambda p: (-int(assignments[p]['land_points_reference']), p))
     rows = [{'stage': 'prepare', 'unit_id': 'station-cf-v1/prepare', 'job_name': 'stcf_prepare',
-             'logical_owner': workers[0], 'cpus': args.prepare_cpus, 'processes': 1,
+             'logical_owner': workers[0], 'cpus': args.prepare_cpus, 'processes': args.prepare_processes,
              'expected_manifest': 'prepared.json', 'depends_on': []}]
     for m, c, s, t, patch in itertools.product(MODELS, SCENARIOS, SCENARIOS, TECHS, patches):
         rows.append({'stage': 'extract', 'unit_id': unit_id(m, c, s, t, patch),

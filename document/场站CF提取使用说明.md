@@ -141,3 +141,11 @@ PY
 本轮完成代码及合成数据验证：新增 23 项测试和已有 46 项相关回归均通过；语法编译和 diff 空白检查通过。文中双 Climate、双 Station、双技术、双 patch 示例已实际完成 16 个 unit、32 份年份 NC 的发布和非对角情景读取，产物位于本地忽略目录 `tmp/station_cf_example/`。这些是测试数据，不是全球场站生产结果。
 
 真实远程 CSV 与优化导出批次比对、真实网格 CF 的密集/稀疏 patch 性能测试和全量场站生产尚未执行；不能用合成样本耗时承诺真实吞吐。本轮不创建超算运行目录或调度脚本。
+
+## prepare 并行与时间轴复用
+
+`prepare_station_cf.py --processes 16` 使用 spawn 进程池并行扫描源 CF 的 patch；允许1–16个进程。Python API 的 `prepare(..., processes=1)` 保留串行默认值。SCNet 生成器默认 `--prepare-processes 16 --prepare-cpus 16`，且不能超过 `--prepare-cpus`。
+
+每份源 NC 仍读取并校验实际时间轴、坐标、掩膜、元数据和 sidecar。时间轴按完整内容（含 dtype/shape）、units、calendar 作为缓存键；只有这些全部一致才复用已验证的日历转换结果。目录和最近邻 mapping 的算法、任务集合、完成判据不变。日志按 source_index/catalogs/mappings 输出完成数量、已用时间和当前阶段剩余时间估计；阶段估计不包含后续阶段。
+
+修改运行中进程尚未加载的代码或共享输出并不能安全加速已有任务。并行版本应使用独立固定 SHA checkout 和新输出根；旧作业可继续完成，两者的 prepared 身份分别保留。代码版本变更后，后续提取账号也必须部署与所选 prepared 一致的 SHA。

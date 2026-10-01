@@ -35,6 +35,9 @@ def test_full_scope_and_dependencies(tmp_path):
     assert len(Counter((r['model'], r['climate_scenario'], r['station_scenario']) for r in extracts)) == 36
     assert sum(r['climate_scenario'] == r['station_scenario'] for r in extracts) == 1128
     assert all(r['logical_owner'] != jobs.AGGREGATOR for r in rows)
+    assert rows[0]['cpus'] == 16
+    assert rows[0]['processes'] == 16
+    assert '--processes 16' in scripts[rows[0]['script']]
     assert rows[0]['stage'] == 'prepare' and rows[-1]['stage'] == 'publish'
     assert all(r['depends_on'] == ['station-cf-v1/prepare'] for r in extracts)
     assert rows[-1]['depends_on'] == 'all_extract_succeeded'
@@ -68,7 +71,7 @@ def test_all_worker_packs_identical_and_shell_valid(tmp_path):
 
 
 @pytest.mark.parametrize('extra', [('--processes', '11'), ('--cpus-per-task', '0'),
-                                    ('--prepare-cpus', '0'), ('--time', '00:00:00'),
+                                    ('--prepare-cpus', '0'), ('--prepare-processes', '17'), ('--time', '00:00:00'),
                                     ('--partition', 'x\n#SBATCH --nodes=9'),
                                     ('--resource-profile', '../bad'), ('--station-chunk', '0')])
 def test_bad_resources_rejected(tmp_path, extra):
@@ -196,7 +199,7 @@ def test_preflight_release_and_script_binding(tmp_path, monkeypatch):
                     climate_scenarios=list(jobs.SCENARIOS),station_scenarios=list(jobs.SCENARIOS),
                     years='2015-2060',capacity_semantics='snapshot_total',bcsd_spot_check_accepted=True,
                     config={'path':str(config),'sha256':config_sha}))
-    environment = dict(SLURM_JOB_ID='123', SLURM_CPUS_PER_TASK='10',SCF_RUN_ID='run',SCF_REPO=str(repo),
+    environment = dict(SLURM_JOB_ID='123', SLURM_CPUS_PER_TASK='16',SCF_RUN_ID='run',SCF_REPO=str(repo),
                        SCF_SHARED_ROOT=str(shared),SCF_CONFIG=str(config),SCF_RELEASE_FILE=str(release),
                        SCF_RELEASE_SHA256=runner.sha(release),SCF_PACK_MANIFEST=str(pack),
                        SCF_JOB_SCRIPT=str(tmp_path/'pack/stcf_prepare.sh'),SLURM_JOB_ACCOUNT=worker)
@@ -208,7 +211,7 @@ def test_preflight_release_and_script_binding(tmp_path, monkeypatch):
     monkeypatch.setattr(runner.subprocess,'check_output',lambda command,**kwargs:
                         SHA if command[1]=='rev-parse' else '' if command[1]=='status' else 'develop-patch-grid')
     args = runner.parser().parse_args(['--stage','prepare','--code-sha',SHA,
-                                      '--config-sha256',config_sha,'--resource-profile','station_cf_v1'])
+                                      '--config-sha256',config_sha,'--resource-profile','station_cf_v1','--processes','16'])
     assert runner.preflight(args)['job_id'] == '123'
     script = Path(environment['SCF_JOB_SCRIPT']); original=script.read_text()
     script.write_text(original+'# changed\n')

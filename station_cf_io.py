@@ -54,16 +54,23 @@ def axis(ds, name):
     return values
 
 
-def time_meta(ds):
+def time_meta(ds, *, cache=None):
     v = ds['time']; raw = axis(ds, 'time')
     units, calendar = v.units, v.calendar
+    fingerprint = array_digest(raw)
+    key = (fingerprint, units, calendar)
+    if cache is not None and key in cache:
+        return dict(cache[key])
     dates = nc.num2date(raw, units, calendar, only_use_cftime_datetimes=True)
     hours = np.asarray(nc.date2num(dates, 'hours since 1970-01-01', calendar), dtype='f8')
     if len(hours) > 1 and not np.allclose(np.diff(hours), 3, rtol=0, atol=1e-7):
         raise ValueError('source CF is not a continuous 3-hour time axis')
-    return {'sha256': array_digest(raw), 'dtype': raw.dtype.str, 'count': len(raw),
+    result = {'sha256': fingerprint, 'dtype': raw.dtype.str, 'count': len(raw),
             'units': units, 'calendar': calendar, 'first_hour': float(hours[0]), 'last_hour': float(hours[-1]),
             'start_year': dates[0].year, 'end_year': dates[-1].year}
+    if cache is not None:
+        cache[key] = dict(result)
+    return result
 
 
 def source_schema(ds, tech):
@@ -79,7 +86,7 @@ def source_schema(ds, tech):
     return {'lat': lat, 'lon': lon, 'mask': mask}
 
 
-def scan_source(manifest_path, *, model, climate_scenario, tech, patch, years, expected_blocks=None):
+def scan_source(manifest_path, *, model, climate_scenario, tech, patch, years, expected_blocks=None, time_cache=None):
     manifest_path = Path(manifest_path).resolve(); meta = read_json(manifest_path)
     prov = meta['provenance']
     if meta['status'] != 'COMPLETED' or digest(prov) != meta['identity']:
@@ -119,7 +126,7 @@ def scan_source(manifest_path, *, model, climate_scenario, tech, patch, years, e
                 spatial = grid
             elif fingerprint != array_digest(spatial['lat'], spatial['lon'], spatial['mask']):
                 raise ValueError('source grid/mask changes between years')
-            tm = time_meta(ds)
+            tm = time_meta(ds, cache=time_cache)
             for k in ('start_year', 'end_year'):
                 if tm[k] != block[k] or side[k] != block[k]:
                     raise ValueError('year block contract mismatch')

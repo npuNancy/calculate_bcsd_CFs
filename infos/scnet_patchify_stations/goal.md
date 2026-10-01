@@ -91,7 +91,7 @@ sbatch 成功响应丢失时记 unknown，通过实际账号、完整 jobname、
 
 ## 6. 资源、容量和恢复
 
-默认 wzhctest、每阶段 10 CPU、24 小时。extract processes=8，prepare/publish 为单进程；科学编码固定 time_chunk=240、station_chunk=1024、compress_level=2。CPU 获取内存的具体计费规则准备时确认，不把历史每核额度当永久保证。BLAS/OpenMP 线程固定 1。
+默认wzhctest，prepare 16 CPU/16进程，extract 10 CPU/8进程，publish 10 CPU/单进程，均为24小时；科学编码固定 time_chunk=240、station_chunk=1024、compress_level=2。CPU 获取内存的具体计费规则准备时确认，不把历史每核额度当永久保证。BLAS/OpenMP 线程固定 1。
 
 容量必须按 **1872 账号/目录实际可用额度**评估。2026-10-01 曾查得共享文件系统约 16.09 PB 空闲，但 quota 返回空，不代表个人有这些空间。已有适用的用户/平台配额确认可继续引用并注明日期与适用账号；有缺项才补查，不重复请求已给出的授权或信息。抽取前结合 prepared 的 raw_cf_bytes、实际压缩样本、临时/失败文件开销与至少 20% 余量，运行中用成功分片字节更新预测。
 

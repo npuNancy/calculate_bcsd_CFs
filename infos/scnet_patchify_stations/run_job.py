@@ -124,6 +124,8 @@ def preflight(args):
         raise ValueError('executed script hash/stage differs from pack')
     if int(env('SLURM_CPUS_PER_TASK')) < row['cpus']:
         raise ValueError('Slurm CPU allocation below prepared resource profile')
+    if args.stage == 'prepare' and args.processes != row['processes']:
+        raise ValueError('prepare processes differ from pack')
     if args.stage == 'extract':
         for key in ('model','climate_scenario','station_scenario','tech','patch','processes','time_chunk','station_chunk','compress_level'):
             if getattr(args,key) != row[key]:
@@ -186,7 +188,7 @@ def extract_evidence(path, args, runtime):
 def execute(args, runtime):
     if args.stage == 'prepare':
         from prepare_station_cf import prepare
-        path = prepare(runtime['config'], runtime['shared'])
+        path = prepare(runtime['config'], runtime['shared'], processes=args.processes)
         prep = prepared_contract(path, runtime['shared'], args.code_sha)
         return {'scientific_status':'COMPLETED','prepared_identity':prep['identity'],
                 'prepared':{**stat(path),'sha256':sha(path)},'units':len(prep['tasks']),
