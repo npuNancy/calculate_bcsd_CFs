@@ -1,0 +1,21 @@
+{
+  "grid_cf_root": "/work/home/acjpoxgsdu/cf_grid/cf_grid_v2_20261001_013720",
+  "stations_root": "/work/home/acbw9wpn5k/project_climate_patchify/shared_run_20260913/inputs/stations",
+  "station_files": {
+    "ssp126": "stations_SSP1-2.6.csv",
+    "ssp245": "stations_SSP2-4.5.csv",
+    "ssp585": "stations_SSP5-6.0.csv"
+  },
+  "station_reference_files": {
+    "ssp126": "/path/to/verified-upstream-export/ssp126/stations_10km.csv",
+    "ssp245": "/path/to/verified-upstream-export/ssp245/stations_10km.csv",
+    "ssp585": "/path/to/verified-upstream-export/ssp560/stations_10km.csv"
+  },
+  "models": ["CANESM5", "MPI-ESM1-2-HR", "MRI-ESM2-0", "BCC-CSM2-MR"],
+  "climate_scenarios": ["ssp126", "ssp245", "ssp585"],
+  "station_scenarios": ["ssp126", "ssp245", "ssp585"],
+  "techs": ["wind", "solar"],
+  "years": "2015-2060",
+  "spatial_method": "nearest_regular",
+  "max_distance_deg": 0.15
+}

@@ -96,3 +96,15 @@ sidecar记录各阶段耗时、读取数组字节数及进程峰值RSS。读取�
 原场站入口 `patchify_station_cf.py` 继续保留，输出 `(time, station)`，现有命令及 SCNet 生成器不变。
 网格CF表示格点上的技术出力能力，不使用装机容量。现有场站Loss读取器不能直接读取新格式；
 非线性物理核意味着“插值网格CF”通常不等于“插值天气后计算场站CF”。
+
+## 从已完成网格 CF 提取场站 CF
+
+`prepare_station_cf.py` 准备场站快照目录和全局最近邻映射，`extract_station_cf.py` 按
+`model × climate_scenario × station_scenario × tech × source_patch` 提取已有 CF，
+生产范围为 **3,384 个 unit**。内部最多八个 spawn 年份进程，输出压缩 `(time,station)` NC，
+保留源时间/日历和缺测；`station_cf_reader.py` 提供惰性读取及有界迭代。
+装机记录按 2030/2040/2050 **累计快照**独立保存，不跨年累加、不乘入 CF。
+
+配置需要独立上游场站 CSV 导出作为快照来源核对。完整 CLI、发布和读取示例见
+[场站 CF 提取使用说明](document/场站CF提取使用说明.md)；
+科学契约见[实施方案](document/全网格CF提取全球场站CF实施方案.md)。
