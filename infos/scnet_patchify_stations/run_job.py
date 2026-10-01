@@ -200,8 +200,8 @@ def execute(args, runtime):
                                              'processes','time_chunk','station_chunk','compress_level')}
         path = extract_unit(runtime['prepared'], **values)
         return extract_evidence(path,args,runtime)
-    from extract_station_cf import publish
-    path = publish(runtime['prepared'], processes=args.processes); index = read(path); summary = index['summary']
+    from station_cf_publish import publish
+    path = publish(runtime['prepared'], runtime['shared']/'runtime/units.json', processes=args.processes); index = read(path); summary = index['summary']
     if (index['status'] != 'COMPLETED' or summary['scope'] != 'production' or summary['units'] != 3384
             or summary['nonempty_units']+summary['empty_units'] != 3384
             or summary['year_nc_files'] != 8*summary['nonempty_units']):
