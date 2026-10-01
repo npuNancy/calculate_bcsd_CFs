@@ -14,3 +14,4 @@ __pycache__/
 .claude/
 tmp/
 /infos/scnet_patchify_grid/completion_status/
+/infos/scnet_patchify_stations/completion_status/
