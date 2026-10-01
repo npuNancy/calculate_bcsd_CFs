@@ -46,7 +46,7 @@ python3 infos/scnet_patchify_stations/create_jobs.py \
   --dry-run
 ```
 
-实际生成去掉 `--dry-run`，在全部 14 worker 各执行一次。默认 wzhctest、prepare 16 CPU，extract/publish 10 CPU，均为24小时；extract 内 8 个 spawn worker、time chunk 240、station chunk 1024、压缩 2。prepare 默认 16 个 spawn 进程建立源索引（`--prepare-processes` 可调），目录和 mapping 顺序生成；publish 单进程，CPU 数也用于满足内存需求；实际分区计费/内存规则仍需核实。
+实际生成去掉 `--dry-run`，在全部 14 worker 各执行一次。默认 wzhctest、prepare 16 CPU，extract/publish 10 CPU，均为24小时；extract 内 8 个 spawn worker、time chunk 240、station chunk 1024、压缩 2。prepare 默认 16 个 spawn 进程建立源索引（`--prepare-processes` 可调），目录和 mapping 顺序生成；publish 默认 8 个 spawn 进程并行验收（`--publish-processes` 可调，不能超过 `--publish-cpus`），主进程统一检查覆盖并发布索引；实际分区计费/内存规则仍需核实。
 
 脚本通过 `SCF_ENV_FILE` 读取账号环境，使用 `source "$SCF_CLIMATE_ACTIVATE" climate` 激活环境。路径、计费账号均不写入 `#SBATCH`；日志是相对 `logs/%x-%j.*`，控制器在提交前创建 logs，并显式传 `--account=<实际worker用户名>`、`--chdir=<worker work root>` 和 `--export=ALL`。
 

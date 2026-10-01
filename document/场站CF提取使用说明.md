@@ -62,11 +62,11 @@ outputs/<model>/climate_<C>/station_<S>/<source_patch>/<tech>/
 
 ## 3. 审核并发布全局索引
 
-全部任务处理后，串行执行：
+全部任务处理后，使用 8 个 spawn 进程并行验收，主进程统一检查覆盖并发布索引：
 
 ```bash
 .venv/bin/python extract_station_cf.py \
-  --prepared /path/to/cf_stations/run1/prepared.json --publish
+  --prepared /path/to/cf_stations/run1/prepared.json --publish --processes 8
 ```
 
 检查所有 unit/八段、NC/sidecar 身份、时间、站点、stat、固定种子源值抽样、catalog 与覆盖守恒。每个流块在提取时已检查有效范围；独立审核为抽样，不是对全部源数组二次扫描。
